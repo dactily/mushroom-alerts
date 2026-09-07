@@ -219,14 +219,19 @@ def fetch(locations: Iterable[Location], *, http: Any, today: date) -> FetchResu
 
     readings: list[Reading] = []
     missing: list[str] = []
+    location_errors: dict[str, str] = {}
     for loc in locs:
         try:
             level, (x, y), votes = level_at(image, loc.lat, loc.lon)
         except Exception as exc:  # noqa: BLE001
-            missing.append(f"{loc.slug}: {type(exc).__name__}")
+            detail = type(exc).__name__
+            location_errors[loc.slug] = detail
+            missing.append(f"{loc.slug}: {detail}")
             continue
         if level is None:
-            missing.append(f"{loc.slug}: no data at px {x},{y}")
+            detail = f"no data at px {x},{y}"
+            location_errors[loc.slug] = detail
+            missing.append(f"{loc.slug}: {detail}")
             continue
         meta: dict[str, Any] = {
             "time_label": time_label,
@@ -252,8 +257,8 @@ def fetch(locations: Iterable[Location], *, http: Any, today: date) -> FetchResu
 
     error = "; ".join(missing) or None
     if not readings:
-        return FetchResult.failure(SOURCE, error or "no locations resolved")
-    return FetchResult.success(SOURCE, readings, error)
+        return FetchResult.failure(SOURCE, error or "no locations resolved", location_errors)
+    return FetchResult.success(SOURCE, readings, error, location_errors)
 
 
 def params_for(location: Location, size: tuple[int, int]) -> dict[str, Any]:

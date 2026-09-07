@@ -100,14 +100,20 @@ def fetch(locations: Iterable[Location], *, http: Any, today: date) -> FetchResu
 
     readings: list[Reading] = []
     problems: list[str] = []
+    location_errors: dict[str, str] = {}
+
+    def problem(slug: str, detail: str) -> None:
+        location_errors[slug] = "; ".join(filter(None, (location_errors.get(slug), detail)))
+        problems.append(f"{slug}: {detail}")
+
     for loc in locs:
         try:
             cell, dist = nearest_cell(cells, loc.lat, loc.lon)
         except Exception as exc:  # noqa: BLE001
-            problems.append(f"{loc.slug}: {type(exc).__name__}")
+            problem(loc.slug, type(exc).__name__)
             continue
         if dist > MAX_CELL_DISTANCE_KM:
-            problems.append(f"{loc.slug}: nearest cell {dist:.0f} km away")
+            problem(loc.slug, f"nearest cell {dist:.0f} km away")
             continue
         word = cell.get("w")
         text = word if isinstance(word, str) and word.strip() else None
@@ -126,7 +132,7 @@ def fetch(locations: Iterable[Location], *, http: Any, today: date) -> FetchResu
         for metric, key in (("level", "l"), ("score", "s")):
             value = cell.get(key)
             if not isinstance(value, (int, float)):
-                problems.append(f"{loc.slug}: cell has no '{key}'")
+                problem(loc.slug, f"cell has no '{key}'")
                 continue
             readings.append(
                 Reading(
@@ -142,8 +148,8 @@ def fetch(locations: Iterable[Location], *, http: Any, today: date) -> FetchResu
 
     error = "; ".join(problems) or None
     if not readings:
-        return FetchResult.failure(SOURCE, error or "no locations resolved")
-    return FetchResult.success(SOURCE, readings, error)
+        return FetchResult.failure(SOURCE, error or "no locations resolved", location_errors)
+    return FetchResult.success(SOURCE, readings, error, location_errors)
 
 
 def params_for(

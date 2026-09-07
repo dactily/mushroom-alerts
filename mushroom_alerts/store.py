@@ -549,6 +549,11 @@ class Store:
         sql += " ORDER BY fr.retrieved_at DESC, fr.created_at DESC LIMIT 1"
         return self.conn.execute(sql, args).fetchone()
 
+    def get_forecast_run(self, run_id: str) -> sqlite3.Row | None:
+        return self.conn.execute(
+            "SELECT * FROM forecast_runs WHERE run_id=?", (run_id,)
+        ).fetchone()
+
     def forecast_run_points(
         self,
         run_id: str,

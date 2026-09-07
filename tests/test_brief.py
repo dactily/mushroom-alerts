@@ -193,7 +193,8 @@ def test_missing_sources_render_as_no_data(tmp_path):
     assert "карта ČHMÚ: нет данных" in text
     assert "HoubyMapa: нет данных" in text
     assert "сбои источников: HoubyMapa: 502" in text
-    assert "в горизонте прогноза не достигается" in text
+    assert "недостаточно данных" in text
+    assert "в горизонте прогноза не достигается" not in text
 
 
 def test_days_flag_shortens_the_forecast_table(tmp_path):
@@ -377,6 +378,7 @@ def test_cli_brief_json(monkeypatch, capsys):
         "date": TODAY.isoformat(),
         "label": "высокая",
         "stale": False,
+        "quality": "fresh",
         "previous": 3.0,
         "yesterday": 3.0,
         "week_ago": 2.0,

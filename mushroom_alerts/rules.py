@@ -79,8 +79,9 @@ from .base import (
     SeriesPoint,
 )
 from .fetch_chmi_map import LEVEL_LABELS
-from .quality import calendar_window, point_from_reading
+from .quality import calendar_window
 from .store import Store
+from .views import location_snapshot
 
 __all__ = [
     "Signal",
@@ -452,6 +453,7 @@ def derive_api30(
         )
         store.upsert_readings(
             api30_lib.to_readings(details, location.slug, today=today, threshold=threshold),
+            retrieved_at=forecast_result.fetched_at,
             calculation_version=api30_lib.CALCULATION_VERSION,
             input_run_ids=input_run_ids,
         )
@@ -461,125 +463,22 @@ def derive_api30(
 # ----------------------------------------------------------------------
 # snapshot: what one location looks like right now, straight from SQLite
 # ----------------------------------------------------------------------
-def snapshot(store: Store, location: Location, today: date) -> dict[str, Any]:
-    """Everything the report needs about one location, read from the store.
-
-    Pure read: ``status`` uses it without fetching anything, and ``check``
-    uses it after the readings of this run have been upserted, so both show
-    the same thing.
-    """
-    slug = location.slug
-    since = today - timedelta(days=HISTORY_DAYS)
-
-    out: dict[str, Any] = {
-        "name": location.name,
-        "slug": slug,
-        "chmi": None,
-        "houbymapa": None,
-        "station": None,
-        "forecast": None,
-    }
-
-    level = store.latest(CHMI_MAP, slug, "level")
-    if level is not None:
-        previous = store.latest(CHMI_MAP, slug, "level", before=level.date)
-        out["chmi"] = {
-            "level": float(level.value),
-            "date": level.date,
-            "label": (level.meta or {}).get("label") or _label(level.value),
-            "stale": bool((level.meta or {}).get("stale")),
-            "previous": None if previous is None else float(previous.value),
-        }
-
-    h_level = store.latest(HOUBYMAPA, slug, "level")
-    h_score = store.latest(HOUBYMAPA, slug, "score")
-    if h_level is not None or h_score is not None:
-        newest = max(r.date for r in (h_level, h_score) if r is not None)
-        out["houbymapa"] = {
-            "level": None if h_level is None else float(h_level.value),
-            "score": None if h_score is None else float(h_score.value),
-            "date": newest,
-            "label": _label(None if h_level is None else h_level.value),
-            "stale": bool(((h_level or h_score).meta or {}).get("stale")),
-        }
-
-    sra = {
-        r.date: float(r.value)
-        for r in store.series(STATION, slug, "sra_mm", since=since, until=today)
-    }
-    t_mean = {
-        r.date: float(r.value)
-        for r in store.series(STATION, slug, "t_mean", since=since, until=today)
-    }
-    api = store.latest(STATION, slug, "api30_mm")
-    if sra or api is not None:
-        sra_readings = store.series(STATION, slug, "sra_mm", since=since, until=today)
-        t_readings = store.series(STATION, slug, "t_mean", since=since, until=today)
-        sra_points = {r.date: point_from_reading(r, today) for r in sra_readings}
-        t_points = {r.date: point_from_reading(r, today) for r in t_readings}
-        rain_window = calendar_window(sra_points, today, RAIN_DAYS)
-        last_t = max(t_mean) if t_mean else None
-        station_meta = None
-        newest_sra = store.latest(STATION, slug, "sra_mm")
-        if newest_sra is not None and (newest_sra.meta or {}).get("station"):
-            station_meta = newest_sra.meta["station"]
-        out["station"] = {
-            "api30_mm": None if api is None else float(api.value),
-            "api30_date": None if api is None else api.date,
-            "sra_window_mm": None if rain_window.total is None else round(rain_window.total, 1),
-            "sra_window_days": rain_window.covered_days,
-            "sra_window_expected_days": rain_window.expected_days,
-            "sra_window_quality": rain_window.quality.value,
-            "sra_window_lower_bound": rain_window.lower_bound,
-            "sra_last_date": max(sra) if sra else None,
-            "t_mean": None if last_t is None else t_mean[last_t],
-            "t_mean_date": last_t,
-            "station": station_meta,
-            "series": {"sra_mm": sra, "t_mean": t_mean},
-            "series_points": {"sra_mm": sra_points, "t_mean": t_points},
-        }
-
-    out["forecast"] = _forecast_view(store, slug, today)
-    return out
-
-
-def _forecast_view(store: Store, slug: str, today: date) -> dict[str, Any] | None:
-    """Compact view of the newest API30 curve plus the rain that drives it."""
-    issued = store.latest_issue(API30_FORECAST, slug, api30_lib.METRIC)
-    if issued is None:
-        return None
-    rows = store.forecast_series(API30_FORECAST, slug, api30_lib.METRIC, issued)
-    curve = [(date.fromisoformat(r["target_date"]), float(r["value"])) for r in rows]
-    now = store.get_reading(API30_FORECAST, slug, api30_lib.METRIC, today)
-    if now is not None:
-        curve = sorted(curve + [(today, float(now.value))])
-    if not curve:
-        return None
-    threshold = api30_lib.threshold_mm()
-    peak_day, peak_value = max(curve, key=lambda pair: (pair[1], pair[0]))
-    cross = api30_lib.crossing(curve, threshold, today=today)
-
-    rain_issue = store.latest_issue(OPENMETEO, slug, "precip_mm")
-    rain: dict[date, float] = {}
-    if rain_issue is not None:
-        rain = {
-            date.fromisoformat(r["target_date"]): float(r["value"])
-            for r in store.forecast_series(OPENMETEO, slug, "precip_mm", rain_issue)
-        }
-    next_rain = next(
-        ((d, rain[d]) for d in sorted(rain) if d > today and rain[d] >= NEXT_RAIN_MM),
-        None,
+def snapshot(
+    store: Store,
+    location: Location,
+    today: date,
+    results: Sequence[FetchResult] = (),
+) -> dict[str, Any]:
+    """Everything the report needs, through the shared read model."""
+    return location_snapshot(
+        store,
+        location,
+        today,
+        history_days=HISTORY_DAYS,
+        rain_days=RAIN_DAYS,
+        next_rain_mm=NEXT_RAIN_MM,
+        results=results,
     )
-    return {
-        "issued": date.fromisoformat(issued),
-        "today_mm": None if now is None else float(now.value),
-        "peak": (peak_day, peak_value),
-        "cross": cross,
-        "threshold_mm": threshold,
-        "next_rain": next_rain,
-        "curve": curve,
-        "rain": rain,
-    }
 
 
 # ----------------------------------------------------------------------
@@ -630,13 +529,16 @@ def _forecast_segment(snap: Mapping[str, Any]) -> str | None:
     bits = []
     if fc["today_mm"] is not None:
         bits.append(f"API30 сегодня {_mm(fc['today_mm'])}")
-    peak_day, peak_value = fc["peak"]
-    bits.append(f"max {_mm(peak_value)} {_d(peak_day)}")
+    if fc.get("peak") is not None:
+        peak_day, peak_value = fc["peak"]
+        bits.append(f"max {_mm(peak_value)} {_d(peak_day)}")
     if fc["next_rain"] is not None:
         day, value = fc["next_rain"]
         bits.append(f"дождь {_mm(value)} {_d(day)}")
     threshold = fc["threshold_mm"]
-    if fc["cross"] is not None:
+    if fc.get("quality") != DataQuality.FRESH.value:
+        bits.append(f"порог {_mm(threshold)}: недостаточно данных")
+    elif fc["cross"] is not None:
         bits.append(f"порог {_mm(threshold)} пройден {_d(fc['cross'])}")
     elif fc["today_mm"] is not None and fc["today_mm"] >= threshold:
         bits.append(f"порог {_mm(threshold)} пройден уже сегодня")
@@ -810,7 +712,9 @@ def _signals_for(
     series_points = station.get("series_points") or {}
     sra = series.get("sra_mm") or {}
     t_mean = series.get("t_mean") or {}
-    if sra:
+    station_quality = station.get("quality")
+    station_usable = station_quality not in {DataQuality.STALE.value, DataQuality.MISSING.value}
+    if sra and station_usable:
         signal = rain_signal(
             series_points.get("sra_mm") or sra,
             series_points.get("t_mean") or t_mean,
@@ -819,7 +723,7 @@ def _signals_for(
         if signal is not None:
             signals.append(signal)
     episode = _last_note(store, slug, T_RAIN_FORECAST)
-    if episode is not None:
+    if episode is not None and station_usable:
         api_now = station.get("api30_mm")
         if api_now is None and sra:
             api_now = api30_lib.api30(sra, today)
@@ -831,7 +735,14 @@ def _signals_for(
     forecast_result = next(
         (r for r in results if r.source == OPENMETEO and r.ok), None
     )
-    if curve and forecast_result is not None:
+    forecast = snap.get("forecast") or {}
+    cross = api30_lib.crossing(curve, threshold, today=today) if curve else None
+    cross_quality = forecast.get("cross_quality") if cross is not None else None
+    forecast_usable = (
+        forecast.get("openmeteo_quality") == DataQuality.FRESH.value
+        and cross_quality == DataQuality.FRESH.value
+    )
+    if curve and forecast_result is not None and forecast_usable:
         signal = api30_signal(
             curve,
             openmeteo.temperatures(forecast_result.readings, slug),
@@ -886,7 +797,7 @@ def decide(
         curve = derive_api30(
             store, location, forecast_result, today=today, threshold=threshold
         )
-        snap = snapshot(store, location, today)
+        snap = snapshot(store, location, today, results)
         candidates = _signals_for(
             location,
             results,

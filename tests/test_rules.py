@@ -8,7 +8,7 @@ readings for "yesterday", because that is exactly what production does.
 from __future__ import annotations
 
 import json
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 
 import pytest
 
@@ -399,7 +399,8 @@ def _decide(store, results, locations=None, today=TODAY):
 def _run(store, results, locations=None, today=TODAY):
     """What ``__main__.cmd_check`` does: upsert first, then decide."""
     for res in results:
-        store.upsert_readings(res.readings)
+        res.fetched_at = datetime.combine(today, time(hour=12), tzinfo=UTC)
+        store.upsert_readings(res.readings, retrieved_at=res.fetched_at)
     return _decide(store, results, locations, today)
 
 

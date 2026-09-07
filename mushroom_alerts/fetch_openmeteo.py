@@ -198,16 +198,19 @@ def fetch(locations: Iterable[Location], *, http: Any, today: date) -> FetchResu
     locs = list(locations)
     readings: list[Reading] = []
     problems: list[str] = []
+    location_errors: dict[str, str] = {}
     for loc in locs:
         try:
             payload = http.get_json(URL, params_for(loc))
             readings.extend(_readings_for_location(loc, payload, today))
         except Exception as exc:  # noqa: BLE001 - soft failure, PLAN §6
-            problems.append(f"{loc.slug}: {type(exc).__name__}: {exc}")
+            detail = f"{type(exc).__name__}: {exc}"
+            location_errors[loc.slug] = detail
+            problems.append(f"{loc.slug}: {detail}")
     error = "; ".join(problems) or None
     if not readings:
-        return FetchResult.failure(SOURCE, error or "no locations resolved")
-    return FetchResult.success(SOURCE, readings, error)
+        return FetchResult.failure(SOURCE, error or "no locations resolved", location_errors)
+    return FetchResult.success(SOURCE, readings, error, location_errors)
 
 
 def series(

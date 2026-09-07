@@ -40,7 +40,7 @@ from typing import Any, Mapping, Sequence
 
 from . import api30 as api30_lib
 from . import rules as rules_lib
-from .base import Location, SeriesPoint
+from .base import FetchResult, Location, SeriesPoint
 from .quality import calendar_window, point_from_reading
 from .store import Store
 
@@ -215,10 +215,11 @@ def location_view(
     *,
     days: int = DEFAULT_DAYS,
     signals: Sequence[Mapping[str, Any]] = (),
+    results: Sequence[FetchResult] = (),
 ) -> dict[str, Any]:
     """Every fact the brief prints about one location, straight from SQLite."""
     slug = location.slug
-    snap = rules_lib.snapshot(store, location, today)
+    snap = rules_lib.snapshot(store, location, today, results)
     threshold = api30_lib.threshold_mm()
 
     # -- now ----------------------------------------------------------
@@ -265,6 +266,10 @@ def location_view(
             "api30_date": station_snap.get("api30_date"),
             "sra": _window_sums(sra_points, today),
             "sra_last_date": station_snap.get("sra_last_date"),
+            "sra_until": station_snap.get("sra_until"),
+            "sra_covered_slots": station_snap.get("sra_covered_slots"),
+            "sra_expected_slots": station_snap.get("sra_expected_slots"),
+            "quality": station_snap.get("quality", "missing"),
             "temp_date": temp_day,
             "t_mean": None if temp_day is None else t_mean.get(temp_day),
             "t_min": None if temp_day is None else t_min.get(temp_day),
@@ -286,11 +291,13 @@ def location_view(
         )
     ]
 
-    # -- forecast -----------------------------------------------------
-    rain = _curve(store, OPENMETEO, slug, "precip_mm", today)
-    f_mean = _curve(store, OPENMETEO, slug, "t_mean", today)
-    f_min = _curve(store, OPENMETEO, slug, "t_min", today)
-    api_curve = _curve(store, API30_FORECAST, slug, api30_lib.METRIC, today)
+    # -- forecast: all model metrics come from the coherent run selected
+    # by the shared snapshot builder.
+    bundle = snap.get("forecast") or {}
+    rain = dict(bundle.get("rain") or {})
+    f_mean = dict(bundle.get("t_mean") or {})
+    f_min = dict(bundle.get("t_min") or {})
+    api_curve = dict(bundle.get("curve") or [])
 
     rows = []
     for offset in range(0, max(days, 0) + 1):
@@ -325,6 +332,13 @@ def location_view(
         "above_threshold_today": today_api30 is not None and today_api30 >= threshold,
         "peak": peak,
         "next_rain": next_rain,
+        "quality": bundle.get("quality", "missing"),
+        "openmeteo_quality": bundle.get("openmeteo_quality", "missing"),
+        "api30_quality": bundle.get("api30_quality", "missing"),
+        "openmeteo_run_id": bundle.get("openmeteo_run_id"),
+        "api30_run_id": bundle.get("api30_run_id"),
+        "openmeteo_retrieved_at": bundle.get("openmeteo_retrieved_at"),
+        "api30_retrieved_at": bundle.get("api30_retrieved_at"),
     }
 
     return {
@@ -337,6 +351,7 @@ def location_view(
         "station": station,
         "history": history,
         "forecast": forecast,
+        "source_status": snap.get("source_status") or {},
         "signals": [dict(s) for s in signals],
     }
 
@@ -350,6 +365,7 @@ def build(
     decision_data: Mapping[str, Any] | None = None,
     notes: Sequence[str] = (),
     failed_sources: Sequence[str] = (),
+    results: Sequence[FetchResult] = (),
     now: datetime | None = None,
 ) -> dict[str, Any]:
     """The whole brief as a plain dict: what :func:`render` prints.
@@ -377,6 +393,7 @@ def build(
                 today,
                 days=days,
                 signals=(per_location.get(loc.slug) or {}).get("signals") or (),
+                results=results,
             )
             for loc in locations
         ],
@@ -425,7 +442,10 @@ def _facts_lines(view: Mapping[str, Any]) -> list[str]:
         f"{w['window_days']} д {_n(w['mm'])} мм" + ("" if w["days"] >= w["window_days"] else f" ({w['days']} дн. с данными)")
         for w in station.get("sra") or []
     )
-    out.append(f"  осадки SRA: {sums}" + f"; последний день станции {_iso(station.get('sra_last_date'))}")
+    station_tail = f"; последний день станции {_iso(station.get('sra_last_date'))}"
+    if station.get("quality") == "partial" and station.get("sra_until"):
+        station_tail += f", выпало к {str(station['sra_until'])[11:16]} UTC"
+    out.append(f"  осадки SRA: {sums}" + station_tail)
     out.append(
         f"  температура за {_iso(station.get('temp_date'))}: средняя {_n(station.get('t_mean'))} °C"
         f", мин {_n(station.get('t_min'))} °C, макс {_n(station.get('t_max'))} °C"
@@ -456,6 +476,9 @@ def _forecast_lines(view: Mapping[str, Any]) -> list[str]:
         f"прогноз, сегодня + {max(len(rows) - 1, 0)} дн. "
         "(дата | +дн | дождь мм | T ср °C | T мин °C | API30 мм):"
     ]
+    quality = str(fc.get("quality") or "missing")
+    if quality in {"missing", "stale", "partial"}:
+        out.append(f"  качество: {quality}; недостаточно данных для уверенного вывода")
     for row in rows:
         out.append(
             f"  {_iso(row['date'])} {('+' + str(row['offset'])):>4}"
@@ -466,7 +489,9 @@ def _forecast_lines(view: Mapping[str, Any]) -> list[str]:
         out.append("  нет данных")
 
     cross = fc.get("cross")
-    if cross is not None:
+    if quality != "fresh":
+        out.append(f"  порог API30 {_n(threshold, 0)} мм: вывод недоступен")
+    elif cross is not None:
         horizon = fc.get("cross_horizon")
         tail = "" if horizon is None else f" (через {horizon} дн.)"
         vague = (
@@ -482,11 +507,13 @@ def _forecast_lines(view: Mapping[str, Any]) -> list[str]:
     if fc.get("peak"):
         day, value = fc["peak"]
         out.append(f"  пик API30: {_n(value)} мм {_iso(day)}")
-    if fc.get("next_rain"):
+    if quality == "fresh" and fc.get("next_rain"):
         day, value = fc["next_rain"]
         out.append(f"  ближайший дождь ≥ {_n(rules_lib.NEXT_RAIN_MM, 0)} мм: {_n(value)} мм {_iso(day)}")
-    else:
+    elif quality == "fresh":
         out.append(f"  ближайший дождь ≥ {_n(rules_lib.NEXT_RAIN_MM, 0)} мм: нет в прогнозе")
+    else:
+        out.append(f"  ближайший дождь ≥ {_n(rules_lib.NEXT_RAIN_MM, 0)} мм: недостаточно данных")
     return out
 
 

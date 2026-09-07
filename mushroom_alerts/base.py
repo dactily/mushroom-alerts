@@ -120,7 +120,7 @@ import traceback
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from enum import Enum
-from typing import Any, Callable, Protocol
+from typing import Any, Callable, Mapping, Protocol
 
 __all__ = [
     "SOURCES",
@@ -274,16 +274,35 @@ class FetchResult:
     readings: list[Reading] = field(default_factory=list)
     error: str | None = None
     fetched_at: datetime = field(default_factory=utcnow)
+    location_errors: dict[str, str] = field(default_factory=dict)
 
     @classmethod
-    def failure(cls, source: str, error: str) -> "FetchResult":
-        return cls(source=source, ok=False, readings=[], error=error)
+    def failure(
+        cls, source: str, error: str, location_errors: Mapping[str, str] | None = None
+    ) -> "FetchResult":
+        return cls(
+            source=source,
+            ok=False,
+            readings=[],
+            error=error,
+            location_errors=dict(location_errors or {}),
+        )
 
     @classmethod
     def success(
-        cls, source: str, readings: list[Reading], error: str | None = None
+        cls,
+        source: str,
+        readings: list[Reading],
+        error: str | None = None,
+        location_errors: Mapping[str, str] | None = None,
     ) -> "FetchResult":
-        return cls(source=source, ok=True, readings=list(readings), error=error)
+        return cls(
+            source=source,
+            ok=True,
+            readings=list(readings),
+            error=error,
+            location_errors=dict(location_errors or {}),
+        )
 
     def for_location(self, slug: str) -> list[Reading]:
         return [r for r in self.readings if r.location == slug]

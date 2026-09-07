@@ -590,19 +590,23 @@ def fetch(locations: Iterable[Location], *, http: Any, today: date) -> FetchResu
 
     readings: list[Reading] = []
     problems: list[str] = []
+    location_errors: dict[str, str] = {}
     for loc in locs:
         try:
             readings.extend(_readings_for(loc, stations, files))
         except Exception as exc:  # noqa: BLE001 - one bad location, not a dead source
-            problems.append(f"{loc.slug}: {type(exc).__name__}: {exc}")
+            detail = f"{type(exc).__name__}: {exc}"
+            location_errors[loc.slug] = detail
+            problems.append(f"{loc.slug}: {detail}")
             continue
         if not any(r.location == loc.slug for r in readings):
+            location_errors[loc.slug] = "no station data"
             problems.append(f"{loc.slug}: no station data")
 
     error = "; ".join(problems) or None
     if not readings:
-        return FetchResult.failure(SOURCE, error or "no station data")
-    return FetchResult.success(SOURCE, readings, error)
+        return FetchResult.failure(SOURCE, error or "no station data", location_errors)
+    return FetchResult.success(SOURCE, readings, error, location_errors)
 
 
 def _readings_for(

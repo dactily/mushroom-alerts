@@ -393,6 +393,7 @@ def cmd_check(args: argparse.Namespace) -> int:
                                 "source": r.source,
                                 "ok": r.ok,
                                 "error": r.error,
+                                "location_errors": r.location_errors,
                                 "fetched_at": r.fetched_at.isoformat(),
                                 "readings": [_reading_dict(x) for x in r.readings],
                             }
@@ -455,6 +456,7 @@ def cmd_brief(args: argparse.Namespace) -> int:
             decision_data=None if decision is None else decision.data,
             notes=notes,
             failed_sources=[r.source for r in run.results if not r.ok],
+            results=run.results,
         )
 
     exit_code = EXIT_ERROR if run.all_failed or calculation_error else EXIT_SILENT
@@ -526,6 +528,8 @@ def cmd_status(args: argparse.Namespace) -> int:
     locations = load_locations()
     rules = _rules_module()
     describe = getattr(rules, "describe", None) if rules is not None else None
+    snapshot = getattr(rules, "snapshot", None) if rules is not None else None
+    jsonable = getattr(rules, "_jsonable", lambda value: value) if rules is not None else lambda value: value
     with Store() as store:
         payload = []
         lines = []
@@ -539,13 +543,17 @@ def cmd_status(args: argparse.Namespace) -> int:
                     traceback.print_exc(file=sys.stderr)
                     line = None
             lines.append(line or format_snapshot(loc, readings, today))
-            payload.append(
-                {
-                    "location": loc.as_dict(),
-                    "params": store.get_params(loc.slug),
-                    "readings": [_reading_dict(r) for r in readings],
-                }
-            )
+            item = {
+                "location": loc.as_dict(),
+                "params": store.get_params(loc.slug),
+                "readings": [_reading_dict(r) for r in readings],
+            }
+            if callable(snapshot):
+                try:
+                    item["view"] = jsonable(snapshot(store, loc, today))
+                except Exception:  # noqa: BLE001 - raw status remains available
+                    traceback.print_exc(file=sys.stderr)
+            payload.append(item)
     if args.json:
         print(jsonlib.dumps({"locations": payload}, ensure_ascii=False, indent=2))
     else:

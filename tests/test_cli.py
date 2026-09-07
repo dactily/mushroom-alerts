@@ -25,6 +25,12 @@ def isolated(tmp_path, monkeypatch):
     monkeypatch.setenv("MUSHROOM_LOCATIONS", str(locations))
     monkeypatch.delenv("MUSHROOM_RECORD", raising=False)
     monkeypatch.setattr(cli, "Http", lambda **kw: _NullHttp())
+    class FrozenDate(date):
+        @classmethod
+        def today(cls):
+            return TODAY
+
+    monkeypatch.setattr(cli, "date", FrozenDate)
     sys.modules.pop("mushroom_alerts.rules", None)
     yield tmp_path
 
