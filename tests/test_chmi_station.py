@@ -302,6 +302,34 @@ def test_ten_minute_sra_uses_the_same_window_as_the_daily_row():
     assert m.ten_minute_sra(samples, date(2026, 9, 6)) == (0.0, None)
 
 
+def test_ten_minute_coverage_requires_every_slot():
+    day = date(2026, 9, 4)
+    start = datetime(2026, 9, 4, 6, 0, tzinfo=timezone.utc)
+    complete = {
+        (m.TEN_MINUTE_SRA, start + timedelta(minutes=10 * n)): 0.1
+        for n in range(144)
+    }
+    detail = m.ten_minute_sra_detail(complete, day)
+    assert detail.complete is True
+    assert detail.covered_slots == detail.expected_slots == 144
+    assert detail.total == 14.4 and detail.missing == ()
+
+    del complete[(m.TEN_MINUTE_SRA, start + timedelta(hours=12))]
+    detail = m.ten_minute_sra_detail(complete, day)
+    assert detail.complete is False
+    assert detail.covered_slots == 143
+    assert detail.missing == (start + timedelta(hours=12),)
+
+
+def test_a_single_last_slot_is_not_a_complete_day():
+    day = date(2026, 9, 4)
+    last = datetime(2026, 9, 5, 5, 50, tzinfo=timezone.utc)
+    detail = m.ten_minute_sra_detail({(m.TEN_MINUTE_SRA, last): 0.0}, day)
+    assert detail.last == last
+    assert detail.covered_slots == 1
+    assert detail.complete is False
+
+
 # ----------------------------------------------------------------------
 # fetch, against the recorded live payloads
 # ----------------------------------------------------------------------

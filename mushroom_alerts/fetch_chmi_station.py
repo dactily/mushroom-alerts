@@ -92,6 +92,8 @@ __all__ = [
     "ten_minute_url",
     "climatological_day",
     "ten_minute_sra",
+    "ten_minute_sra_detail",
+    "TenMinuteCoverage",
 ]
 
 SOURCE = "chmi_station"
@@ -385,6 +387,45 @@ def ten_minute_sra(
     return round(total, 2), last
 
 
+@dataclass(frozen=True, slots=True)
+class TenMinuteCoverage:
+    """Precipitation total and coverage of one 144-slot climatic day."""
+
+    total: float
+    first: datetime | None
+    last: datetime | None
+    covered_slots: int
+    expected_slots: int
+    missing: tuple[datetime, ...]
+
+    @property
+    def complete(self) -> bool:
+        return self.covered_slots == self.expected_slots
+
+
+def ten_minute_sra_detail(
+    samples: dict[tuple[str, datetime], float], day: date
+) -> TenMinuteCoverage:
+    """Return SRA plus exact coverage of the expected UTC timestamps."""
+    start = datetime(day.year, day.month, day.day, DAY_START_HOUR, tzinfo=timezone.utc)
+    expected = tuple(start + timedelta(minutes=10 * n) for n in range(24 * 6))
+    used = {
+        when.astimezone(timezone.utc): float(value)
+        for (element, when), value in samples.items()
+        if element == TEN_MINUTE_SRA and climatological_day(when) == day
+    }
+    present = sorted(set(expected) & set(used))
+    missing = tuple(stamp for stamp in expected if stamp not in used)
+    return TenMinuteCoverage(
+        total=round(sum(used[stamp] for stamp in present), 2),
+        first=present[0] if present else None,
+        last=present[-1] if present else None,
+        covered_slots=len(present),
+        expected_slots=len(expected),
+        missing=missing,
+    )
+
+
 # ----------------------------------------------------------------------
 # URLs
 # ----------------------------------------------------------------------
@@ -508,21 +549,21 @@ def _choose(
 
 def _provisional_sra(
     files: _Files, wsi: str, last_day: date | None, today: date
-) -> list[tuple[date, float, datetime | None]]:
+) -> list[tuple[date, TenMinuteCoverage]]:
     """Sum 10-minute rain for the days the daily file has not reached yet."""
     if not TEN_MINUTE:
         return []
     start = (last_day + timedelta(days=1)) if last_day else today
     days = _daterange(start, today)[-MAX_PROVISIONAL_DAYS:]
-    out: list[tuple[date, float, datetime | None]] = []
+    out: list[tuple[date, TenMinuteCoverage]] = []
     for day in days:
         # A climatological day spans two calendar files: [D 06:00Z, D+1 06:00Z).
         samples: dict[tuple[str, datetime], float] = dict(files.ten_minute(wsi, day))
         if day + timedelta(days=1) <= today:
             samples.update(files.ten_minute(wsi, day + timedelta(days=1)))
-        total, last = ten_minute_sra(samples, day)
-        if last is not None:
-            out.append((day, total, last))
+        detail = ten_minute_sra_detail(samples, day)
+        if detail.last is not None:
+            out.append((day, detail))
     return out
 
 
@@ -615,7 +656,7 @@ def _readings_for(
         provisional = _provisional_sra(files, primary.station.wsi, last_sra, today)
     except Exception:  # noqa: BLE001 - optional extra, never fatal
         provisional = []
-    for day, total, last in provisional:
+    for day, detail in provisional:
         if ("sra_mm", day) in seen:
             continue
         seen.add(("sra_mm", day))
@@ -625,15 +666,19 @@ def _readings_for(
                 location=loc.slug,
                 date=day,
                 metric="sra_mm",
-                value=total,
+                value=detail.total,
                 text=None,
                 meta={
                     "wsi": primary.station.wsi,
                     "distance_km": round(primary.distance_km, 2),
                     "element": TEN_MINUTE_SRA,
                     "provisional": True,
-                    "complete": bool(last and last >= _day_end(day)),
-                    "until": last.isoformat() if last else None,
+                    "complete": detail.complete,
+                    "from": detail.first.isoformat() if detail.first else None,
+                    "until": detail.last.isoformat() if detail.last else None,
+                    "covered_slots": detail.covered_slots,
+                    "expected_slots": detail.expected_slots,
+                    "gaps": [stamp.isoformat() for stamp in detail.missing],
                     "station": station_meta,
                     "stations": stations_meta,
                 },

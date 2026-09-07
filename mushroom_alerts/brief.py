@@ -40,7 +40,8 @@ from typing import Any, Mapping, Sequence
 
 from . import api30 as api30_lib
 from . import rules as rules_lib
-from .base import Location
+from .base import Location, SeriesPoint
+from .quality import calendar_window, point_from_reading
 from .store import Store
 
 __all__ = [
@@ -173,18 +174,22 @@ def _curve(
 
 
 def _window_sums(
-    sra: Mapping[date, float], today: date, windows: Sequence[int] = SRA_WINDOWS
+    sra: Mapping[date, float | SeriesPoint],
+    today: date,
+    windows: Sequence[int] = SRA_WINDOWS,
 ) -> list[dict[str, Any]]:
-    """Trailing SRA sums.  ``days`` counts the days that actually had data."""
+    """Trailing SRA sums over exact calendar intervals."""
     out = []
     for span in windows:
-        start = today - timedelta(days=span - 1)
-        days = [d for d in sra if start <= d <= today]
+        aggregate = calendar_window(sra, today, span)
         out.append(
             {
                 "window_days": span,
-                "mm": round(sum(sra[d] for d in days), 1) if days else None,
-                "days": len(days),
+                "mm": None if aggregate.total is None else round(aggregate.total, 1),
+                "days": aggregate.covered_days,
+                "expected_days": aggregate.expected_days,
+                "quality": aggregate.quality.value,
+                "lower_bound": aggregate.lower_bound,
             }
         )
     return out
@@ -239,6 +244,10 @@ def location_view(
     api_obs = _series(store, STATION, slug, "api30_mm", since, today)
     t_min = _series(store, STATION, slug, "t_min", since, today)
     t_max = _series(store, STATION, slug, "t_max", since, today)
+    sra_points = {
+        r.date: point_from_reading(r, today)
+        for r in store.series(STATION, slug, "sra_mm", since=since, until=today)
+    }
 
     temp_day = max(t_mean) if t_mean else None
     soil = []
@@ -254,7 +263,7 @@ def location_view(
             "meta": station_snap.get("station"),
             "api30_mm": station_snap.get("api30_mm"),
             "api30_date": station_snap.get("api30_date"),
-            "sra": _window_sums(sra, today),
+            "sra": _window_sums(sra_points, today),
             "sra_last_date": station_snap.get("sra_last_date"),
             "temp_date": temp_day,
             "t_mean": None if temp_day is None else t_mean.get(temp_day),

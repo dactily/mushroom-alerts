@@ -13,7 +13,7 @@ from datetime import date, timedelta
 import pytest
 
 from mushroom_alerts import api30, rules
-from mushroom_alerts.base import FetchResult, Location, Reading
+from mushroom_alerts.base import DataQuality, FetchResult, Location, Reading, SeriesPoint
 from mushroom_alerts.store import Store
 
 from .conftest import BYSTRICE, VALMEZ
@@ -148,6 +148,10 @@ def test_houbymapa_fires_on_the_first_ever_reading():
     assert rules.houbymapa_signal(4.0, 0.63, None, None) is not None
 
 
+def test_houbymapa_ignores_stale_data():
+    assert rules.houbymapa_signal(5.0, 0.9, 2.0, 0.2, stale=True) is None
+
+
 # ----------------------------------------------------------------------
 # trigger 3 -- rain precursor and its window
 # ----------------------------------------------------------------------
@@ -188,6 +192,35 @@ def test_rain_only_looks_at_the_last_three_days():
     sra.update({TODAY - timedelta(days=n): 1.0 for n in (0, 1, 2)})
     t = {d: 15.0 for d in sra}
     assert rules.rain_signal(sra, t, TODAY) is None
+
+
+def test_sparse_historical_dates_do_not_form_a_three_day_episode():
+    sra = {
+        TODAY - timedelta(days=20): 10.0,
+        TODAY - timedelta(days=10): 10.0,
+        TODAY - timedelta(days=1): 10.0,
+    }
+    t = {TODAY - timedelta(days=n): 15.0 for n in range(3)}
+    assert rules.rain_signal(sra, t, TODAY) is None
+
+
+def test_partial_rain_is_a_lower_bound_but_stale_temperature_closes_trigger():
+    sra = {
+        TODAY - timedelta(days=1): SeriesPoint(
+            TODAY - timedelta(days=1), 22.0, "chmi_station", DataQuality.PARTIAL
+        )
+    }
+    fresh_t = {TODAY - timedelta(days=n): 15.0 for n in range(3)}
+    signal = rules.rain_signal(sra, fresh_t, TODAY)
+    assert signal is not None
+    assert signal.data["lower_bound"] is True
+    assert signal.data["covered_days"] == 1
+
+    stale_t = {
+        day: SeriesPoint(day, value, "chmi_station", DataQuality.STALE)
+        for day, value in fresh_t.items()
+    }
+    assert rules.rain_signal(sra, stale_t, TODAY) is None
 
 
 def test_rain_ignores_the_future():

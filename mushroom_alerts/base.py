@@ -119,6 +119,7 @@ import json
 import traceback
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
+from enum import Enum
 from typing import Any, Callable, Protocol
 
 __all__ = [
@@ -126,6 +127,9 @@ __all__ = [
     "EXIT_SILENT",
     "EXIT_SIGNAL",
     "EXIT_ERROR",
+    "DataQuality",
+    "SeriesPoint",
+    "WindowAggregate",
     "Location",
     "Reading",
     "FetchResult",
@@ -154,6 +158,59 @@ EXIT_SIGNAL = 10
 def utcnow() -> datetime:
     """Timezone-aware UTC now.  Use this instead of ``datetime.utcnow()``."""
     return datetime.now(timezone.utc)
+
+
+class DataQuality(str, Enum):
+    """Usability of a value for a current decision."""
+
+    FRESH = "fresh"
+    PARTIAL = "partial"
+    STALE = "stale"
+    MISSING = "missing"
+
+
+@dataclass(frozen=True, slots=True)
+class SeriesPoint:
+    """One normalized point used by window calculations and views."""
+
+    date: date
+    value: float | None
+    source: str
+    quality: DataQuality
+    valid_at: datetime | None = None
+    issued_at: datetime | None = None
+    covered: int | None = None
+    expected: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class WindowAggregate:
+    """Calendar-window result; a partial total is a lower bound."""
+
+    start: date
+    end: date
+    total: float | None
+    mean: float | None
+    covered_days: int
+    expected_days: int
+    quality: DataQuality
+    lower_bound: bool
+
+    @property
+    def complete(self) -> bool:
+        return self.covered_days == self.expected_days and self.quality is DataQuality.FRESH
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "start": self.start.isoformat(),
+            "end": self.end.isoformat(),
+            "total": self.total,
+            "mean": self.mean,
+            "covered_days": self.covered_days,
+            "expected_days": self.expected_days,
+            "quality": self.quality.value,
+            "lower_bound": self.lower_bound,
+        }
 
 
 @dataclass(frozen=True, slots=True)

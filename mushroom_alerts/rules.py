@@ -69,14 +69,17 @@ from typing import Any, Iterable, Mapping, Sequence
 from . import api30 as api30_lib
 from . import fetch_openmeteo as openmeteo
 from .base import (
+    DataQuality,
     EXIT_SIGNAL,
     EXIT_SILENT,
     Decision,
     FetchResult,
     Location,
     Reading,
+    SeriesPoint,
 )
 from .fetch_chmi_map import LEVEL_LABELS
+from .quality import calendar_window, point_from_reading
 from .store import Store
 
 __all__ = [
@@ -205,6 +208,8 @@ def houbymapa_signal(
     score: float | None,
     previous_level: float | None,
     previous_score: float | None,
+    *,
+    stale: bool = False,
 ) -> Signal | None:
     """PLAN §3 trigger 2: ``l >= 4`` or ``s >= 0.6`` today but not yesterday."""
 
@@ -213,7 +218,7 @@ def houbymapa_signal(
             sc is not None and sc >= HOUBY_SCORE
         )
 
-    if not good(level, score) or good(previous_level, previous_score):
+    if stale or not good(level, score) or good(previous_level, previous_score):
         return None
     label = _label(level)
     parts = []
@@ -237,8 +242,8 @@ def houbymapa_signal(
 
 
 def rain_signal(
-    sra: Mapping[date, float],
-    t_mean: Mapping[date, float],
+    sra: Mapping[date, float | SeriesPoint],
+    t_mean: Mapping[date, float | SeriesPoint],
     today: date,
     *,
     days: int = RAIN_DAYS,
@@ -246,37 +251,45 @@ def rain_signal(
 ) -> Signal | None:
     """PLAN §3 trigger 3, first half: enough rain at the right temperature.
 
-    ``sra`` is the station series including today's provisional value; the
-    last ``days`` days *that have a value* are used, so a hole in the daily
-    files shortens the window instead of pretending it was dry.
+    ``sra`` may include today's provisional lower bound.  The interval is
+    calendar-based; missing rain cannot prove dryness, and missing or stale
+    temperature closes the trigger.
     """
-    window = [d for d in sorted(sra) if d <= today][-days:]
-    if not window:
+    rain = calendar_window(sra, today, days)
+    temps = calendar_window(t_mean, today, days)
+    if rain.total is None or temps.mean is None:
         return None
-    total = sum(float(sra[d]) for d in window)
-    temps = [float(t_mean[d]) for d in window if d in t_mean]
-    mean = sum(temps) / len(temps) if temps else None
-    if total < minimum_mm or mean is None:
+    if rain.total < minimum_mm or temps.covered_days != days:
         return None
-    if not RAIN_T_MIN <= mean <= RAIN_T_MAX:
+    if temps.quality in {DataQuality.STALE, DataQuality.MISSING}:
         return None
-    anchor = max(window, key=lambda d: float(sra[d]))
+    if not RAIN_T_MIN <= temps.mean <= RAIN_T_MAX:
+        return None
+    first_day = today - timedelta(days=days - 1)
+    window = [d for d in sorted(sra) if first_day <= d <= today]
+    anchor = max(
+        window,
+        key=lambda d: float(sra[d].value if isinstance(sra[d], SeriesPoint) else sra[d]),
+    )
     start = anchor + timedelta(days=WINDOW_FROM_DAYS)
     end = anchor + timedelta(days=WINDOW_TO_DAYS)
     return Signal(
         trigger=T_RAIN_FORECAST,
         text=(
-            f"дождь {_mm(total)} за {len(window)} дня (максимум {_d(anchor)}), "
-            f"T {_c(mean)} → окно {_d(start)}–{_d(end)}"
+            f"дождь {_mm(rain.total)} за {days} дня (максимум {_d(anchor)}), "
+            f"T {_c(temps.mean)} → окно {_d(start)}–{_d(end)}"
         ),
         # The identity of the news is the rain episode, not its exact sum:
         # tomorrow the same rain still dominates a shifted 3-day window.
         key=anchor.isoformat(),
         data={
-            "total_mm": round(total, 1),
+            "total_mm": round(rain.total, 1),
             "anchor": anchor.isoformat(),
             "days": [d.isoformat() for d in window],
-            "t_mean": round(mean, 1),
+            "covered_days": rain.covered_days,
+            "expected_days": rain.expected_days,
+            "lower_bound": rain.lower_bound,
+            "t_mean": round(temps.mean, 1),
             "window": [start.isoformat(), end.isoformat()],
         },
         cooldown=WINDOW_TO_DAYS,
@@ -487,7 +500,11 @@ def snapshot(store: Store, location: Location, today: date) -> dict[str, Any]:
     }
     api = store.latest(STATION, slug, "api30_mm")
     if sra or api is not None:
-        window = sorted(sra)[-RAIN_DAYS:]
+        sra_readings = store.series(STATION, slug, "sra_mm", since=since, until=today)
+        t_readings = store.series(STATION, slug, "t_mean", since=since, until=today)
+        sra_points = {r.date: point_from_reading(r, today) for r in sra_readings}
+        t_points = {r.date: point_from_reading(r, today) for r in t_readings}
+        rain_window = calendar_window(sra_points, today, RAIN_DAYS)
         last_t = max(t_mean) if t_mean else None
         station_meta = None
         newest_sra = store.latest(STATION, slug, "sra_mm")
@@ -496,13 +513,17 @@ def snapshot(store: Store, location: Location, today: date) -> dict[str, Any]:
         out["station"] = {
             "api30_mm": None if api is None else float(api.value),
             "api30_date": None if api is None else api.date,
-            "sra_window_mm": round(sum(sra[d] for d in window), 1) if window else None,
-            "sra_window_days": len(window),
+            "sra_window_mm": None if rain_window.total is None else round(rain_window.total, 1),
+            "sra_window_days": rain_window.covered_days,
+            "sra_window_expected_days": rain_window.expected_days,
+            "sra_window_quality": rain_window.quality.value,
+            "sra_window_lower_bound": rain_window.lower_bound,
             "sra_last_date": max(sra) if sra else None,
             "t_mean": None if last_t is None else t_mean[last_t],
             "t_mean_date": last_t,
             "station": station_meta,
             "series": {"sra_mm": sra, "t_mean": t_mean},
+            "series_points": {"sra_mm": sra_points, "t_mean": t_points},
         }
 
     out["forecast"] = _forecast_view(store, slug, today)
@@ -765,6 +786,7 @@ def _signals_for(
             None if h_score is None else float(h_score.value),
             None if p_level is None else float(p_level.value),
             None if p_score is None else float(p_score.value),
+            stale=bool(((h_level or h_score).meta or {}).get("stale")),
         )
         if signal is not None:
             signals.append(signal)
@@ -772,10 +794,15 @@ def _signals_for(
     # -- trigger 3: rain precursor, then the window it announced -------
     station = snap.get("station") or {}
     series = station.get("series") or {}
+    series_points = station.get("series_points") or {}
     sra = series.get("sra_mm") or {}
     t_mean = series.get("t_mean") or {}
     if sra:
-        signal = rain_signal(sra, t_mean, today)
+        signal = rain_signal(
+            series_points.get("sra_mm") or sra,
+            series_points.get("t_mean") or t_mean,
+            today,
+        )
         if signal is not None:
             signals.append(signal)
     episode = _last_note(store, slug, T_RAIN_FORECAST)
@@ -870,7 +897,11 @@ def decide(
 
         view = {k: v for k, v in snap.items() if k != "station"}
         if snap.get("station"):
-            view["station"] = {k: v for k, v in snap["station"].items() if k != "series"}
+            view["station"] = {
+                k: v
+                for k, v in snap["station"].items()
+                if k not in {"series", "series_points"}
+            }
         data["locations"][location.slug] = {
             "snapshot": _jsonable(view),
             "signals": [
