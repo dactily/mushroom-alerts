@@ -81,13 +81,28 @@ SOURCE_LABELS = {
 # ----------------------------------------------------------------------
 # fetcher discovery
 # ----------------------------------------------------------------------
+@dataclass(slots=True)
+class _UnavailableFetcher:
+    """Module-shaped fetcher that reports an import failure explicitly."""
+
+    SOURCE: str
+    detail: str
+
+    def fetch(
+        self, locations: list[Location], *, http: Any, today: date
+    ) -> FetchResult:
+        return FetchResult.failure(self.SOURCE, self.detail)
+
+
 def discover_fetchers(only: Sequence[str] | None = None) -> list[Any]:
     """Import every available ``fetch_*`` module (plus ``api30`` if it is a
     fetcher too).  Modules that are absent or fail to import are skipped --
     other agents add theirs later, and the CLI must not care.
 
     ``only`` filters by source id (``chmi_map``) or module name
-    (``fetch_chmi_map``); an unknown name simply matches nothing.
+    (``fetch_chmi_map``); an unknown name simply matches nothing.  Import
+    failures are represented by a module-shaped failed fetcher, rather than
+    disappearing from the run without a diagnostic.
     """
     package = __package__ or __name__.rsplit(".", 1)[0]
     names = {
@@ -101,19 +116,24 @@ def discover_fetchers(only: Sequence[str] | None = None) -> list[Any]:
     wanted = {s.strip().lower() for s in only} if only else None
     modules: list[Any] = []
     for name in ordered:
+        source_hint = name.removeprefix("fetch_")
+        if wanted is not None and not (
+            source_hint.lower() in wanted or name.lower() in wanted
+        ):
+            continue
         try:
             mod = importlib.import_module(f"{package}.{name}")
-        except Exception:  # noqa: BLE001 - not written yet / broken deps
+        except Exception as exc:  # noqa: BLE001 - convert to source failure
+            # api30 is discoverable for historical reasons but is not a
+            # fetcher.  Do not invent an upstream failure if that helper
+            # module itself cannot be imported.
+            if name != "api30":
+                detail = traceback.format_exception_only(type(exc), exc)[-1].strip()
+                modules.append(_UnavailableFetcher(source_hint, f"import failed: {detail}"))
             continue
         if not callable(getattr(mod, "fetch", None)):
             continue
         source = getattr(mod, "SOURCE", name)
-        if wanted is not None and not (
-            source.lower() in wanted
-            or name.lower() in wanted
-            or name.removeprefix("fetch_").lower() in wanted
-        ):
-            continue
         modules.append(mod)
     return modules
 
@@ -419,22 +439,35 @@ def cmd_brief(args: argparse.Namespace) -> int:
         # The decision is what derives and stores the API30 curve and names
         # the triggers that fired; the brief only reports them.
         decision = _decide(locations, run.results, store=store, today=today)
+        calculation_error = None
+        if decision is None:
+            calculation_error = "rules module is unavailable"
+        elif decision.exit_code == EXIT_ERROR:
+            calculation_error = decision.text or "rules calculation failed"
+        notes = list(run.notes)
+        if calculation_error:
+            notes.append(f"расчёт: {calculation_error}")
         payload = brief_lib.build(
             store,
             locations,
             today,
             days=max(int(getattr(args, "days", brief_lib.DEFAULT_DAYS) or 0), 0),
             decision_data=None if decision is None else decision.data,
-            notes=run.notes,
+            notes=notes,
             failed_sources=[r.source for r in run.results if not r.ok],
         )
 
+    exit_code = EXIT_ERROR if run.all_failed or calculation_error else EXIT_SILENT
     if args.json:
-        payload = dict(brief_lib.to_json(payload), exit_code=EXIT_ERROR if run.all_failed else EXIT_SILENT)
+        payload = dict(
+            brief_lib.to_json(payload),
+            exit_code=exit_code,
+            calculation_error=calculation_error,
+        )
         print(jsonlib.dumps(payload, ensure_ascii=False, indent=2))
     else:
         print(brief_lib.render(payload), end="")
-    return EXIT_ERROR if run.all_failed else EXIT_SILENT
+    return exit_code
 
 
 def _decide(
@@ -455,7 +488,8 @@ def _decide(
         rules = importlib.import_module(f"{package}.rules")
     except Exception:  # noqa: BLE001 - rules exists but is broken => error
         traceback.print_exc(file=sys.stderr)
-        return Decision(exit_code=EXIT_ERROR, text="rules module failed to import")
+        message = "rules module failed to import"
+        return Decision(exit_code=EXIT_ERROR, text=message, data={"error": message})
     decide = getattr(rules, "decide", None)
     if not callable(decide):
         return None
@@ -463,9 +497,11 @@ def _decide(
         decision = decide(locations, results, store=store, today=today)
     except Exception:  # noqa: BLE001 - a broken rules module is an error
         traceback.print_exc(file=sys.stderr)
-        return Decision(exit_code=EXIT_ERROR, text="rules.decide() failed")
+        message = "rules.decide() failed"
+        return Decision(exit_code=EXIT_ERROR, text=message, data={"error": message})
     if not isinstance(decision, Decision):
-        return Decision(exit_code=EXIT_ERROR, text="rules.decide() returned a non-Decision")
+        message = "rules.decide() returned a non-Decision"
+        return Decision(exit_code=EXIT_ERROR, text=message, data={"error": message})
     return decision
 
 

@@ -18,7 +18,7 @@ import pytest
 
 from mushroom_alerts import __main__ as cli
 from mushroom_alerts import brief as brief_lib
-from mushroom_alerts.base import FetchResult, Location, Reading
+from mushroom_alerts.base import Decision, FetchResult, Location, Reading
 from mushroom_alerts.store import Store
 
 SHIPPED = Path(__file__).resolve().parent.parent / "locations.yaml"
@@ -319,6 +319,31 @@ def test_cli_brief_exits_1_when_every_source_fails(monkeypatch, capsys):
     )
     assert cli.main(["brief"]) == 1
     assert "сбои источников: ČHMÚ: down; HoubyMapa: 502" in capsys.readouterr().out
+
+
+def test_cli_brief_exits_1_when_rules_fail(monkeypatch, capsys):
+    full_stack(monkeypatch)
+    monkeypatch.setattr(
+        cli,
+        "_decide",
+        lambda *a, **k: Decision(1, "rules.decide() failed", {"error": "rules.decide() failed"}),
+    )
+
+    assert cli.main(["brief", "--json"]) == 1
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload["exit_code"] == 1
+    assert payload["calculation_error"] == "rules.decide() failed"
+    assert payload["notes"][-1] == "расчёт: rules.decide() failed"
+
+
+def test_cli_brief_keeps_partial_source_failure_nonfatal(monkeypatch, capsys):
+    full_stack(monkeypatch, error="valaska-bystrice: timeout")
+    assert cli.main(["brief", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["exit_code"] == 0
+    assert payload["calculation_error"] is None
+    assert payload["notes"] == ["Open-Meteo: valaska-bystrice: timeout"]
 
 
 def test_cli_brief_without_fetchers_is_an_error(monkeypatch):

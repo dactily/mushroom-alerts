@@ -229,6 +229,23 @@ def test_discover_fetchers_finds_the_real_modules():
     assert {m.SOURCE for m in cli.discover_fetchers(["fetch_chmi_map"])} == {"chmi_map"}
 
 
+def test_discover_fetchers_reports_import_failure(monkeypatch):
+    real_import = cli.importlib.import_module
+
+    def broken_import(name):
+        if name == "mushroom_alerts.fetch_houbymapa":
+            raise ImportError("missing parser")
+        return real_import(name)
+
+    monkeypatch.setattr(cli.importlib, "import_module", broken_import)
+    modules = cli.discover_fetchers(["houbymapa"])
+    assert len(modules) == 1
+    result = modules[0].fetch([], http=None, today=TODAY)
+    assert result.ok is False
+    assert result.source == "houbymapa"
+    assert result.error == "import failed: ImportError: missing parser"
+
+
 def test_status_reads_the_store_without_fetching(monkeypatch, capsys):
     use_fetchers(monkeypatch, [fake_module("chmi_map", readings=[reading("chmi_map", "valmez", "level", 4)])])
     cli.main(["check"])
