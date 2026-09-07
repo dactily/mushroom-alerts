@@ -515,8 +515,8 @@ def cmd_status(args: argparse.Namespace) -> int:
     else:
         print("\n".join(lines) if lines else "no locations configured")
         if getattr(args, "weekly", False):
-            # PLAN §2b / stage 2: the Sunday digest is not implemented yet.
-            print("(týdenní digest: TODO, etapa 2)")
+            # PLAN §2b / stage 2: the Friday weekend digest is not implemented yet.
+            print("(недельный дайджест: TODO, этап 2)")
     return EXIT_SILENT
 
 
