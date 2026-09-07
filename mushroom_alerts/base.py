@@ -101,11 +101,10 @@ Identity / upsert key
 
 ``rules.py`` protocol
 ---------------------
-``rules`` is optional; the CLI degrades to a plain snapshot when it is
-missing.  When present it MUST expose::
+``rules`` is required and MUST expose::
 
     def decide(locations: list[Location], results: list[FetchResult], *,
-               store: Store, today: date) -> Decision
+               store: Store, today: date, record: bool = True) -> Decision
 
 and, like a fetcher, should not raise -- the CLI treats an exception from
 ``decide`` as exit code 1.  ``Decision.exit_code`` follows the Hermes

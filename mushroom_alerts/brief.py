@@ -9,8 +9,7 @@ Interpretation now lives in Hermes Agent (see ``hermes/PROMPT.md``); this
 module is the other half of that split -- it prints **only facts**, in a
 compact, deterministic, LLM-friendly shape, and never draws a conclusion.
 
-``check`` stays exactly as it was: the deterministic fallback and what the
-tests pin (PLAN §2b).
+``check`` remains the deterministic exit-code interface (PLAN §2b).
 
 Shape of the brief (per location, ~1-2 KB)
 ------------------------------------------

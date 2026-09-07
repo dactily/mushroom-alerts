@@ -3,34 +3,28 @@
 Exit-code contract for Hermes (PLAN §2)::
 
     0   nothing to say, stay silent
-    10  positive signal -- forward stdout to Telegram verbatim
+    10  positive signal emitted to stdout
     1   error: the script itself crashed, or *every* source failed
 
 A single dead source is never an error: it becomes a note in the report and
 the other sources carry on (PLAN §6).
 
-``check`` fetches, upserts every reading, and only then hands the results
-to ``rules.decide`` -- that order is load-bearing: the triggers ask the
-store what yesterday looked like, and ``rules`` derives and stores the
-API30 forecast curve on top of what was just written.  Without a ``rules``
-module the CLI falls back to printing one collapsed snapshot line per
-location and exiting 0.
+``check`` fetches, stores, derives the API30 curve, evaluates the rules,
+renders the result, and records only signals emitted to stdout.
 
 ``brief`` runs the very same pipeline (:func:`run_pipeline` + :func:`_decide`)
 and then prints the facts at length instead of collapsing them: it is what
 Hermes Agent reads and interprets (PLAN §2b, ``mushroom_alerts/brief.py``,
-``hermes/PROMPT.md``).  It always exits ``0`` unless every source failed.
+``hermes/PROMPT.md``). It exits ``1`` when every source failed or rule
+calculation failed; partial results remain exit ``0``.
 
-``status`` never fetches: it renders what is in SQLite, through
-``rules.describe`` when that is importable and through ``format_snapshot``
-otherwise.
+``status`` never fetches: it renders the shared location view from SQLite.
 """
 
 from __future__ import annotations
 
 import argparse
 import importlib
-import importlib.util
 import json as jsonlib
 import os
 import pkgutil
@@ -57,6 +51,7 @@ from .locations import (
     locations_path,
     remove_location,
 )
+from . import rules as rules_lib
 from .store import Store
 
 #: Preferred run order; modules not listed run afterwards, alphabetically.
@@ -174,124 +169,6 @@ def cache_params(store: Store, results: Iterable[FetchResult]) -> None:
         store.set_params(slug, params)
 
 
-# ----------------------------------------------------------------------
-# formatting
-# ----------------------------------------------------------------------
-def _fmt_value(reading: Reading) -> str:
-    if reading.metric == "level":
-        return f"{int(reading.value)}/5"
-    if reading.metric == "score":
-        return f"{reading.value:.2f}"
-    if reading.metric == "rh":
-        return f"{reading.value:.0f} %"
-    if reading.metric.endswith("_mm"):  # sra_mm, precip_mm, api30_mm
-        return f"{reading.value:.0f} mm" if abs(reading.value) >= 10 else f"{reading.value:.1f} mm"
-    if reading.metric.startswith("t_"):
-        return f"{reading.value:.1f} °C"
-    return f"{reading.value:g}"
-
-
-def _newest_per_metric(readings: Iterable[Reading]) -> list[Reading]:
-    """One reading per metric: the newest observation, forecasts last.
-
-    The station publishes 35 days x 9 metrics and Open-Meteo 19 days x 4;
-    printing all of that is not a report, it is a data dump.
-    """
-    best: dict[str, Reading] = {}
-    for r in readings:
-        current = best.get(r.metric)
-        if current is None:
-            best[r.metric] = r
-            continue
-        # prefer an observation over a forecast, then the newer day
-        rank = (not r.is_forecast, r.date)
-        if rank > (not current.is_forecast, current.date):
-            best[r.metric] = r
-    return [best[m] for m in sorted(best)]
-
-
-def _fmt_segment(source: str, readings: list[Reading]) -> str:
-    label = SOURCE_LABELS.get(source, source)
-    parts = []
-    for r in _newest_per_metric(readings):
-        if r.metric == "level":
-            parts.append(_fmt_value(r))
-        else:
-            parts.append(f"{r.metric} {_fmt_value(r)}")
-    flag = " (starý)" if any((r.meta or {}).get("stale") for r in readings) else ""
-    return f"{label} {' '.join(parts)}{flag}"
-
-
-def _forecast_segment(source: str, readings: list[Reading], today: date) -> str:
-    """Compact one-liner for the two multi-day forecast sources.
-
-    ``api30_forecast`` -> today's value, the peak, and the day the threshold
-    is crossed (or ``—``); ``openmeteo`` -> the next day with >= 5 mm of
-    rain.  Both are curves; the newest-value-per-metric rule above would say
-    nothing useful about them.
-    """
-    from . import api30 as api30_lib
-
-    label = SOURCE_LABELS.get(source, source)
-    if source == api30_lib.FORECAST_SOURCE:
-        curve = sorted((r.date, float(r.value)) for r in readings if r.metric == api30_lib.METRIC)
-        if not curve:
-            return f"{label} —"
-        threshold = api30_lib.threshold_mm()
-        now = next((v for d, v in curve if d == today), None)
-        peak_day, peak = max(curve, key=lambda pair: (pair[1], pair[0]))
-        bits = []
-        if now is not None:
-            bits.append(f"сегодня {now:.0f} mm")
-        bits.append(f"max {peak:.0f} mm {peak_day.day}.{peak_day.month}.")
-        cross = api30_lib.crossing(curve, threshold, today=today)
-        if cross is not None:
-            bits.append(f"порог {threshold:.0f} mm {cross.day}.{cross.month}.")
-        elif now is not None and now >= threshold:
-            bits.append(f"порог {threshold:.0f} mm уже сегодня")
-        else:
-            bits.append(f"порог {threshold:.0f} mm —")
-        return f"{label} " + ", ".join(bits)
-
-    rain = sorted((r.date, float(r.value)) for r in readings if r.metric == "precip_mm")
-    nxt = next(((d, v) for d, v in rain if d > today and v >= 5.0), None)
-    total = sum(v for d, v in rain if d > today)
-    bits = [f"дождь +{total:.0f} mm/16 дн"] if rain else []
-    if nxt is not None:
-        bits.append(f"ближайший ≥5 mm {nxt[1]:.0f} mm {nxt[0].day}.{nxt[0].month}.")
-    elif rain:
-        bits.append("ближайший ≥5 mm —")
-    return f"{label} " + ", ".join(bits) if bits else f"{label} —"
-
-
-def format_snapshot(
-    location: Location, readings: list[Reading], today: date | None = None
-) -> str:
-    """PLAN §3 shape: one line per location, one segment per source.
-
-    Multi-day sources are collapsed: the station and HoubyMapa to their
-    newest value per metric, the two forecast curves to a summary.  This is
-    the fallback rendering -- ``rules.describe`` does a better job and is
-    what ``status`` uses when ``rules`` is importable.
-    """
-    day = today or date.today()
-    by_source: dict[str, list[Reading]] = {}
-    for r in readings:
-        by_source.setdefault(r.source, []).append(r)
-    if not by_source:
-        return f"🍄 {location.name}: нет данных"
-    order = [s for s in SOURCE_LABELS if s in by_source] + [
-        s for s in sorted(by_source) if s not in SOURCE_LABELS
-    ]
-    segments = [
-        _forecast_segment(s, by_source[s], day)
-        if s in ("openmeteo", "api30_forecast")
-        else _fmt_segment(s, by_source[s])
-        for s in order
-    ]
-    return f"🍄 {location.name}: " + ", ".join(segments)
-
-
 def _reading_dict(r: Reading) -> dict[str, Any]:
     return {
         "source": r.source,
@@ -364,20 +241,7 @@ def cmd_check(args: argparse.Namespace) -> int:
         results, notes, all_failed = run.results, run.notes, run.all_failed
 
         decision = _decide(locations, results, store=store, today=today)
-        if decision is None:  # no rules module yet -> plain snapshot
-            lines = [
-                format_snapshot(
-                    loc,
-                    [r for res in results for r in res.for_location(loc.slug)],
-                    today,
-                )
-                for loc in locations
-            ]
-            decision = Decision(
-                exit_code=EXIT_ERROR if all_failed else EXIT_SILENT,
-                text="" if all_failed else "\n".join(lines),
-            )
-        elif all_failed:
+        if all_failed:
             decision.exit_code = EXIT_ERROR
 
         if args.json:
@@ -443,9 +307,7 @@ def cmd_brief(args: argparse.Namespace) -> int:
             locations, run.results, store=store, today=today, record=False
         )
         calculation_error = None
-        if decision is None:
-            calculation_error = "rules module is unavailable"
-        elif decision.exit_code == EXIT_ERROR:
+        if decision.exit_code == EXIT_ERROR:
             calculation_error = decision.text or "rules calculation failed"
         notes = list(run.notes)
         if calculation_error:
@@ -455,7 +317,7 @@ def cmd_brief(args: argparse.Namespace) -> int:
             locations,
             today,
             days=max(int(getattr(args, "days", brief_lib.DEFAULT_DAYS) or 0), 0),
-            decision_data=None if decision is None else decision.data,
+            decision_data=decision.data,
             notes=notes,
             failed_sources=[r.source for r in run.results if not r.ok],
             results=run.results,
@@ -481,14 +343,9 @@ def _decide(
     store: Store,
     today: date,
     record: bool = True,
-) -> Decision | None:
-    """Call ``rules.decide`` if the module exists.  ``None`` = not available."""
+) -> Decision:
+    """Call the required rules module and convert failures to exit 1."""
     package = __package__ or __name__.rsplit(".", 1)[0]
-    try:
-        if importlib.util.find_spec(f"{package}.rules") is None:
-            return None
-    except (ImportError, ValueError):
-        return None
     try:
         rules = importlib.import_module(f"{package}.rules")
     except Exception:  # noqa: BLE001 - rules exists but is broken => error
@@ -497,7 +354,8 @@ def _decide(
         return Decision(exit_code=EXIT_ERROR, text=message, data={"error": message})
     decide = getattr(rules, "decide", None)
     if not callable(decide):
-        return None
+        message = "rules.decide() is unavailable"
+        return Decision(exit_code=EXIT_ERROR, text=message, data={"error": message})
     try:
         kwargs = {"store": store, "today": today}
         if not record:
@@ -513,60 +371,27 @@ def _decide(
     return decision
 
 
-def _rules_module() -> Any | None:
-    """The ``rules`` module, or ``None`` if it is absent or broken.
-
-    ``status`` must never fail because of it; ``check`` uses ``_decide``,
-    which is stricter on purpose (a broken ``rules`` there is exit 1).
-    """
-    package = __package__ or __name__.rsplit(".", 1)[0]
-    try:
-        if importlib.util.find_spec(f"{package}.rules") is None:
-            return None
-        return importlib.import_module(f"{package}.rules")
-    except Exception:  # noqa: BLE001 - degrade to the plain snapshot
-        return None
-
-
 def cmd_status(args: argparse.Namespace) -> int:
     """Print the last stored snapshot.  Never fetches -- ``check`` does that."""
     today = date.today()
     locations = load_locations()
-    rules = _rules_module()
-    describe = getattr(rules, "describe", None) if rules is not None else None
-    snapshot = getattr(rules, "snapshot", None) if rules is not None else None
-    jsonable = getattr(rules, "_jsonable", lambda value: value) if rules is not None else lambda value: value
     with Store() as store:
         payload = []
         lines = []
         for loc in locations:
             readings = store.latest_snapshot(loc.slug)
-            line = None
-            if callable(describe):
-                try:
-                    line = describe(store, loc, today)
-                except Exception:  # noqa: BLE001 - fall back, never crash
-                    traceback.print_exc(file=sys.stderr)
-                    line = None
-            lines.append(line or format_snapshot(loc, readings, today))
+            lines.append(rules_lib.describe(store, loc, today))
             item = {
                 "location": loc.as_dict(),
                 "params": store.get_params(loc.slug),
                 "readings": [_reading_dict(r) for r in readings],
             }
-            if callable(snapshot):
-                try:
-                    item["view"] = jsonable(snapshot(store, loc, today))
-                except Exception:  # noqa: BLE001 - raw status remains available
-                    traceback.print_exc(file=sys.stderr)
+            item["view"] = rules_lib._jsonable(rules_lib.snapshot(store, loc, today))
             payload.append(item)
     if args.json:
         print(jsonlib.dumps({"locations": payload}, ensure_ascii=False, indent=2))
     else:
         print("\n".join(lines) if lines else "no locations configured")
-        if getattr(args, "weekly", False):
-            # PLAN §2b / stage 2: the Friday weekend digest is not implemented yet.
-            print("(недельный дайджест: TODO, этап 2)")
     return EXIT_SILENT
 
 
@@ -660,7 +485,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_status = sub.add_parser("status", help="print the last stored snapshot")
     p_status.add_argument("--json", action="store_true")
     p_status.add_argument(
-        "--weekly", action="store_true", help="weekly digest (TODO, stage 2)"
+        "--weekly", action="store_true", help="deprecated compatibility no-op"
     )
     p_status.set_defaults(func=cmd_status)
 

@@ -1,8 +1,9 @@
 """The decision layer: fetch results + SQLite history -> exit code and text.
 
-``decide`` is the only thing the CLI calls (contract in ``base``); it is
-also where the API30 forecast curve is *derived* and written back to the
-store, because the trigger needs the curve anyway -- see "Derivation" below.
+The compatibility facade ``decide`` composes four explicit phases:
+``derive`` writes the calculated API30 release, ``evaluate`` and ``render``
+are side-effect free, and ``record_emissions`` stores only signals emitted
+by ``check``.  ``brief`` uses the same phases without recording emissions.
 
 Triggers (PLAN §3, one per location, any of them fires exit ``10``)
 -------------------------------------------------------------------
@@ -30,12 +31,11 @@ Triggers (PLAN §3, one per location, any of them fires exit ``10``)
     forecast that wobbles by a day is not news (PLAN §6).
 
 Every trigger is a small pure function taking plain values and returning an
-optional :class:`Signal`; :func:`decide` does all the store I/O around them,
-which is what makes them testable without a database.
+optional :class:`Signal`.
 
 Derivation
 ----------
-:func:`derive_api30` runs inside :func:`decide`, once per location, *after*
+:func:`derive_api30` runs inside :func:`derive`, once per location, *after*
 the fetchers have stored their readings: station ``sra_mm`` from SQLite is
 the observed part, Open-Meteo ``precip_mm`` from this run is the forecast
 part, and the resulting curve is upserted as source ``api30_forecast``
@@ -49,21 +49,22 @@ Antispam (PLAN §3 trigger 5)
 Deliberately minimal, and the "season is open, stay silent until it drops
 to <= 2" hysteresis of PLAN §3 is **not** implemented (dropped by the user).
 What is implemented: a signal carries a ``key`` -- its identity as *news* --
-and is suppressed when the same key was already sent for that location on
+and is suppressed when the same key was already emitted for that location on
 an earlier day inside ``Signal.cooldown``.  Re-running ``check`` on the same
 day always re-emits (same text, same exit code, no second row in
-``notifications``), so a repeated cron run is idempotent.
+``signal_emissions``), so a repeated cron run is idempotent.
 
-``notifications.text`` holds a JSON blob ``{"key", "text", "data"}`` rather
-than bare prose: the rain window and the crossing date have to be read back
-by the next run.
+``signal_emissions.text_json`` holds a JSON blob ``{"key", "text", "data"}``
+rather than bare prose: the rain window and crossing date must be read by the
+next run. This records stdout emission, not confirmed transport delivery.
 """
 
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field, is_dataclass
 from datetime import date, timedelta
+from enum import Enum
 from typing import Any, Iterable, Mapping, Sequence
 
 from . import api30 as api30_lib
@@ -118,7 +119,7 @@ UNAVAILABLE = {
     API30_FORECAST: "API30 недоступен",
 }
 
-# -- trigger ids (also the ``trigger`` column of ``notifications``) ------
+# -- trigger ids (also the ``trigger`` column of ``signal_emissions``) ---
 T_CHMI = "chmi_map"
 T_HOUBY = "houbymapa"
 T_RAIN_FORECAST = "rain_forecast"
@@ -325,7 +326,7 @@ def rain_window_signal(
     """PLAN §3 trigger 3, second half: the announced window has arrived.
 
     ``episode`` is the ``data`` blob of the earlier ``rain_forecast``
-    notification; the window only counts if the ground is still wet, i.e.
+    emission; the window only counts if the ground is still wet, i.e.
     the station's API30 is at or above the threshold.
     """
     if not episode or api30_now is None or api30_now < threshold:
@@ -610,7 +611,7 @@ def describe(store: Store, location: Location, today: date) -> str:
 
 
 # ----------------------------------------------------------------------
-# antispam / notification bookkeeping
+# antispam / emission bookkeeping
 # ----------------------------------------------------------------------
 def _last_note(store: Store, slug: str, trigger: str) -> tuple[date, dict[str, Any]] | None:
     row = store.last_emission(slug, trigger)
@@ -771,6 +772,10 @@ def _signals_for(
 
 
 def _jsonable(value: Any) -> Any:
+    if is_dataclass(value) and not isinstance(value, type):
+        return _jsonable(asdict(value))
+    if isinstance(value, Enum):
+        return value.value
     if isinstance(value, date):
         return value.isoformat()
     if isinstance(value, dict):

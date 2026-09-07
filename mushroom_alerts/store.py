@@ -1,4 +1,4 @@
-"""SQLite state: readings history, derived params cache, notification log.
+"""SQLite state: readings, forecast releases, cache, and emission log.
 
 Path comes from ``$MUSHROOM_DB``, default ``./state.sqlite``.  Everything is
 plain stdlib ``sqlite3``; the file is also what Metabase will read (PLAN §2).

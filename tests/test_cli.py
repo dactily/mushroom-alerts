@@ -77,22 +77,6 @@ def install_rules(monkeypatch, decide):
 # ----------------------------------------------------------------------
 # exit codes
 # ----------------------------------------------------------------------
-def test_check_without_a_rules_decision_prints_a_snapshot(monkeypatch, capsys):
-    """The fallback path: ``rules`` unavailable -> collapsed snapshot, exit 0."""
-    monkeypatch.setattr(cli, "_decide", lambda *a, **k: None)
-    use_fetchers(
-        monkeypatch,
-        [
-            fake_module("chmi_map", readings=[reading("chmi_map", "valmez", "level", 3)]),
-            fake_module("houbymapa", readings=[reading("houbymapa", "valmez", "score", 0.47)]),
-        ],
-    )
-    assert cli.main(["check"]) == 0
-    out = capsys.readouterr().out
-    assert "Valašské Meziříčí" in out and "ČHMÚ 3/5" in out and "HoubyMapa score 0.47" in out
-    assert "Valašská Bystřice: нет данных" in out
-
-
 def test_check_returns_10_when_rules_signal(monkeypatch, capsys):
     use_fetchers(monkeypatch, [fake_module("chmi_map", readings=[reading("chmi_map", "valmez", "level", 4)])])
     install_rules(monkeypatch, lambda locs, res, *, store, today: Decision(10, "🍄 signal!"))
@@ -331,7 +315,6 @@ def multi_day(source, slug, metric, values, meta=None):
 
 def test_check_collapses_multi_day_sources(monkeypatch, capsys):
     """35 days x 9 metrics must not end up in a Telegram message."""
-    monkeypatch.setattr(cli, "_decide", lambda *a, **k: None)
     station = (
         multi_day("chmi_station", "valmez", "sra_mm", [(-2, 17.2), (-1, 0.2), (0, 2.3)])
         + multi_day("chmi_station", "valmez", "t_mean", [(-2, 16.0), (-1, 15.0), (0, 14.2)])
@@ -352,12 +335,8 @@ def test_check_collapses_multi_day_sources(monkeypatch, capsys):
     assert cli.main(["check"]) == 0
     line = next(l for l in capsys.readouterr().out.splitlines() if "Meziříčí" in l)
     assert len(line) < 250, line
-    # one value per station metric, the newest one
-    assert "sra_mm 2.3 mm" in line and "t_mean 14.2 °C" in line
-    assert "api30_mm 20 mm" in line and "rh 81 %" in line
-    assert line.count("sra_mm") == 1 and line.count("t_mean") == 1
-    # ... and a summary, not a dump, for the two curves
-    assert "ближайший ≥5 mm 10 mm" in line
+    assert "станция API30 20 mm, SRA 3d 20 mm, T 14.2 °C" in line
+    assert "дождь 9.8 mm" in line
     assert "API30 сегодня 19 mm, max 31 mm" in line and "порог 25 mm" in line
 
 
@@ -382,6 +361,29 @@ def test_status_renders_the_rules_line(monkeypatch, capsys):
     assert "ČHMÚ 3/5" in out and "станция API30 20 mm" in out and "SRA 3d 20 mm" in out
 
 
+def test_status_json_serializes_the_populated_shared_view(monkeypatch, capsys):
+    use_fetchers(
+        monkeypatch,
+        [
+            fake_module(
+                "chmi_station",
+                readings=multi_day(
+                    "chmi_station", "valmez", "sra_mm", [(-1, 1.0), (0, 2.0)]
+                )
+                + multi_day("chmi_station", "valmez", "t_mean", [(-1, 14.0), (0, 15.0)]),
+            )
+        ],
+    )
+    assert cli.main(["check"]) == 0
+    capsys.readouterr()
+    assert cli.main(["status", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    view = payload["locations"][0]["view"]
+    assert view["station"]["series_points"]["sra_mm"][TODAY.isoformat()]["value"] == 2.0
+    assert view["biological"]["rules_version"] == "1"
+
+
 def test_status_weekly_does_not_crash(capsys):
     assert cli.main(["status", "--weekly"]) == 0
-    assert "TODO" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "Valašské Meziříčí" in out and "TODO" not in out
