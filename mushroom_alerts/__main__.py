@@ -9,9 +9,16 @@ Exit-code contract for Hermes (PLAN §2)::
 A single dead source is never an error: it becomes a note in the report and
 the other sources carry on (PLAN §6).
 
-``check`` hands the fetch results to ``rules.decide`` when a ``rules``
-module exists; until wave B lands it falls back to printing one line per
+``check`` fetches, upserts every reading, and only then hands the results
+to ``rules.decide`` -- that order is load-bearing: the triggers ask the
+store what yesterday looked like, and ``rules`` derives and stores the
+API30 forecast curve on top of what was just written.  Without a ``rules``
+module the CLI falls back to printing one collapsed snapshot line per
 location and exiting 0.
+
+``status`` never fetches: it renders what is in SQLite, through
+``rules.describe`` when that is importable and through ``format_snapshot``
+otherwise.
 """
 
 from __future__ import annotations
@@ -20,6 +27,7 @@ import argparse
 import importlib
 import importlib.util
 import json as jsonlib
+import os
 import pkgutil
 import sys
 import traceback
@@ -148,17 +156,38 @@ def _fmt_value(reading: Reading) -> str:
         return f"{int(reading.value)}/5"
     if reading.metric == "score":
         return f"{reading.value:.2f}"
-    if reading.metric.endswith("_mm"):
-        return f"{reading.value:.0f} mm"
+    if reading.metric == "rh":
+        return f"{reading.value:.0f} %"
+    if reading.metric.endswith("_mm"):  # sra_mm, precip_mm, api30_mm
+        return f"{reading.value:.0f} mm" if abs(reading.value) >= 10 else f"{reading.value:.1f} mm"
     if reading.metric.startswith("t_"):
         return f"{reading.value:.1f} °C"
     return f"{reading.value:g}"
 
 
+def _newest_per_metric(readings: Iterable[Reading]) -> list[Reading]:
+    """One reading per metric: the newest observation, forecasts last.
+
+    The station publishes 35 days x 9 metrics and Open-Meteo 19 days x 4;
+    printing all of that is not a report, it is a data dump.
+    """
+    best: dict[str, Reading] = {}
+    for r in readings:
+        current = best.get(r.metric)
+        if current is None:
+            best[r.metric] = r
+            continue
+        # prefer an observation over a forecast, then the newer day
+        rank = (not r.is_forecast, r.date)
+        if rank > (not current.is_forecast, current.date):
+            best[r.metric] = r
+    return [best[m] for m in sorted(best)]
+
+
 def _fmt_segment(source: str, readings: list[Reading]) -> str:
     label = SOURCE_LABELS.get(source, source)
     parts = []
-    for r in sorted(readings, key=lambda r: r.metric):
+    for r in _newest_per_metric(readings):
         if r.metric == "level":
             parts.append(_fmt_value(r))
         else:
@@ -167,8 +196,59 @@ def _fmt_segment(source: str, readings: list[Reading]) -> str:
     return f"{label} {' '.join(parts)}{flag}"
 
 
-def format_snapshot(location: Location, readings: list[Reading]) -> str:
-    """PLAN §3 shape: one line per location, one segment per source."""
+def _forecast_segment(source: str, readings: list[Reading], today: date) -> str:
+    """Compact one-liner for the two multi-day forecast sources.
+
+    ``api30_forecast`` -> today's value, the peak, and the day the threshold
+    is crossed (or ``—``); ``openmeteo`` -> the next day with >= 5 mm of
+    rain.  Both are curves; the newest-value-per-metric rule above would say
+    nothing useful about them.
+    """
+    from . import api30 as api30_lib
+
+    label = SOURCE_LABELS.get(source, source)
+    if source == api30_lib.FORECAST_SOURCE:
+        curve = sorted((r.date, float(r.value)) for r in readings if r.metric == api30_lib.METRIC)
+        if not curve:
+            return f"{label} —"
+        threshold = api30_lib.threshold_mm()
+        now = next((v for d, v in curve if d == today), None)
+        peak_day, peak = max(curve, key=lambda pair: (pair[1], pair[0]))
+        bits = []
+        if now is not None:
+            bits.append(f"dnes {now:.0f} mm")
+        bits.append(f"max {peak:.0f} mm {peak_day.day}.{peak_day.month}.")
+        cross = api30_lib.crossing(curve, threshold, today=today)
+        if cross is not None:
+            bits.append(f"práh {threshold:.0f} mm {cross.day}.{cross.month}.")
+        elif now is not None and now >= threshold:
+            bits.append(f"práh {threshold:.0f} mm už dnes")
+        else:
+            bits.append(f"práh {threshold:.0f} mm —")
+        return f"{label} " + ", ".join(bits)
+
+    rain = sorted((r.date, float(r.value)) for r in readings if r.metric == "precip_mm")
+    nxt = next(((d, v) for d, v in rain if d > today and v >= 5.0), None)
+    total = sum(v for d, v in rain if d > today)
+    bits = [f"déšť +{total:.0f} mm/16 d"] if rain else []
+    if nxt is not None:
+        bits.append(f"nejbližší ≥5 mm {nxt[1]:.0f} mm {nxt[0].day}.{nxt[0].month}.")
+    elif rain:
+        bits.append("nejbližší ≥5 mm —")
+    return f"{label} " + ", ".join(bits) if bits else f"{label} —"
+
+
+def format_snapshot(
+    location: Location, readings: list[Reading], today: date | None = None
+) -> str:
+    """PLAN §3 shape: one line per location, one segment per source.
+
+    Multi-day sources are collapsed: the station and HoubyMapa to their
+    newest value per metric, the two forecast curves to a summary.  This is
+    the fallback rendering -- ``rules.describe`` does a better job and is
+    what ``status`` uses when ``rules`` is importable.
+    """
+    day = today or date.today()
     by_source: dict[str, list[Reading]] = {}
     for r in readings:
         by_source.setdefault(r.source, []).append(r)
@@ -177,7 +257,12 @@ def format_snapshot(location: Location, readings: list[Reading]) -> str:
     order = [s for s in SOURCE_LABELS if s in by_source] + [
         s for s in sorted(by_source) if s not in SOURCE_LABELS
     ]
-    segments = [_fmt_segment(s, by_source[s]) for s in order]
+    segments = [
+        _forecast_segment(s, by_source[s], day)
+        if s in ("openmeteo", "api30_forecast")
+        else _fmt_segment(s, by_source[s])
+        for s in order
+    ]
     return f"🍄 {location.name}: " + ", ".join(segments)
 
 
@@ -222,7 +307,11 @@ def cmd_check(args: argparse.Namespace) -> int:
         decision = _decide(locations, results, store=store, today=today)
         if decision is None:  # no rules module yet -> plain snapshot
             lines = [
-                format_snapshot(loc, [r for res in results for r in res.for_location(loc.slug)])
+                format_snapshot(
+                    loc,
+                    [r for res in results for r in res.for_location(loc.slug)],
+                    today,
+                )
                 for loc in locations
             ]
             decision = Decision(
@@ -299,15 +388,40 @@ def _decide(
     return decision
 
 
+def _rules_module() -> Any | None:
+    """The ``rules`` module, or ``None`` if it is absent or broken.
+
+    ``status`` must never fail because of it; ``check`` uses ``_decide``,
+    which is stricter on purpose (a broken ``rules`` there is exit 1).
+    """
+    package = __package__ or __name__.rsplit(".", 1)[0]
+    try:
+        if importlib.util.find_spec(f"{package}.rules") is None:
+            return None
+        return importlib.import_module(f"{package}.rules")
+    except Exception:  # noqa: BLE001 - degrade to the plain snapshot
+        return None
+
+
 def cmd_status(args: argparse.Namespace) -> int:
     """Print the last stored snapshot.  Never fetches -- ``check`` does that."""
+    today = date.today()
     locations = load_locations()
+    rules = _rules_module()
+    describe = getattr(rules, "describe", None) if rules is not None else None
     with Store() as store:
         payload = []
         lines = []
         for loc in locations:
             readings = store.latest_snapshot(loc.slug)
-            lines.append(format_snapshot(loc, readings))
+            line = None
+            if callable(describe):
+                try:
+                    line = describe(store, loc, today)
+                except Exception:  # noqa: BLE001 - fall back, never crash
+                    traceback.print_exc(file=sys.stderr)
+                    line = None
+            lines.append(line or format_snapshot(loc, readings, today))
             payload.append(
                 {
                     "location": loc.as_dict(),
@@ -319,6 +433,9 @@ def cmd_status(args: argparse.Namespace) -> int:
         print(jsonlib.dumps({"locations": payload}, ensure_ascii=False, indent=2))
     else:
         print("\n".join(lines) if lines else "no locations configured")
+        if getattr(args, "weekly", False):
+            # PLAN §2b / stage 2: the Sunday digest is not implemented yet.
+            print("(týdenní digest: TODO, etapa 2)")
     return EXIT_SILENT
 
 
@@ -384,6 +501,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_status = sub.add_parser("status", help="print the last stored snapshot")
     p_status.add_argument("--json", action="store_true")
+    p_status.add_argument(
+        "--weekly", action="store_true", help="weekly digest (TODO, stage 2)"
+    )
     p_status.set_defaults(func=cmd_status)
 
     p_add = sub.add_parser("add", help="add a location to locations.yaml")
@@ -409,6 +529,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         return int(args.func(args))
     except KeyboardInterrupt:  # pragma: no cover
         return EXIT_ERROR
+    except BrokenPipeError:  # `check --json | head` is not an error
+        try:  # pragma: no cover - keep the interpreter from complaining at exit
+            os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        except OSError:
+            pass
+        return EXIT_SILENT
     except Exception:  # noqa: BLE001 - the CLI itself crashed => exit 1
         traceback.print_exc(file=sys.stderr)
         return EXIT_ERROR

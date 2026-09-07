@@ -366,6 +366,15 @@ class Store:
             )
         return len(rows)
 
+    def latest_issue(self, source: str, location: str, metric: str) -> str | None:
+        """ISO date of the newest forecast run we have, or ``None``."""
+        row = self.conn.execute(
+            """SELECT MAX(issued) AS issued FROM forecasts
+               WHERE source=? AND location=? AND metric=?""",
+            (source, location, metric),
+        ).fetchone()
+        return row["issued"] if row and row["issued"] else None
+
     def forecast_series(
         self, source: str, location: str, metric: str, issued: date | str
     ) -> list[sqlite3.Row]:

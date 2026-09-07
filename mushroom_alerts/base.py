@@ -55,15 +55,33 @@ Rules for ``fetch``:
     ==============  ======================================================
     ``level``       ČHMÚ / HoubyMapa growth level, 1..5 (5 = best)
     ``score``       HoubyMapa ``s``, 0.0..1.0
-    ``sra_mm``      daily precipitation total, mm
+    ``sra_mm``      daily precipitation total of a ČHMÚ station, mm
+    ``precip_mm``   daily precipitation total of a *model* (Open-Meteo), mm
     ``api30_mm``    API30 antecedent precipitation index, mm
     ``t_mean``      daily mean temperature, °C
     ``t_min``       daily minimum temperature, °C
+    ``t_max``       daily maximum temperature, °C
+    ``rh``          relative humidity, %
+    ``t_soil_5``    soil temperature at 5 cm, °C (likewise ``_10``/``_20``)
     ``soil_moist``  volumetric soil moisture, 0..1
     ==============  ======================================================
 
     Adding a metric is free; reusing an existing name with different units
     is not.  Values are always ``float``.
+
+    ``sra_mm`` and ``precip_mm`` are deliberately different names for
+    "rain on day D", because the two are different quantities:
+
+    * ``sra_mm`` (station) covers the **climatological day**
+      ``[D 06:00 UTC, D+1 06:00 UTC)`` -- the gauge is read at 06 UTC and
+      ČHMÚ books the total on the day the interval *starts*.  It is also
+      what ``api30_mm`` is built from: ``API30(D)`` never uses ``SRA(D)``.
+    * ``precip_mm`` (Open-Meteo) is a **calendar day** in Europe/Prague,
+      i.e. ``[D 00:00, D+1 00:00)`` local time.
+
+    The two windows overlap by 18 h, and ``api30.extend_series`` splices
+    them day-onto-day without a shift -- an approximation that is much
+    smaller than the model's own wet bias (see ``fetch_openmeteo``).
 ``date``
     The day the value *describes*.  For a forecast that is the **target**
     day, and ``meta["issued"]`` is the ISO date the forecast was issued on.

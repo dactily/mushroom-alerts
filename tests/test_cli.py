@@ -71,7 +71,9 @@ def install_rules(monkeypatch, decide):
 # ----------------------------------------------------------------------
 # exit codes
 # ----------------------------------------------------------------------
-def test_check_without_rules_is_silent(monkeypatch, capsys):
+def test_check_without_a_rules_decision_prints_a_snapshot(monkeypatch, capsys):
+    """The fallback path: ``rules`` unavailable -> collapsed snapshot, exit 0."""
+    monkeypatch.setattr(cli, "_decide", lambda *a, **k: None)
     use_fetchers(
         monkeypatch,
         [
@@ -82,6 +84,7 @@ def test_check_without_rules_is_silent(monkeypatch, capsys):
     assert cli.main(["check"]) == 0
     out = capsys.readouterr().out
     assert "Valašské Meziříčí" in out and "ČHMÚ 3/5" in out and "HoubyMapa score 0.47" in out
+    assert "Valašská Bystřice: žádná data" in out
 
 
 def test_check_returns_10_when_rules_signal(monkeypatch, capsys):
@@ -281,3 +284,81 @@ def test_add_invalidates_a_stale_cache_for_the_same_slug():
     assert cli.main(["add", "Kelč", "49.4899", "17.8069"]) == 0
     with Store() as store:
         assert store.get_params("kelc") == {}
+
+
+# ----------------------------------------------------------------------
+# report shape
+# ----------------------------------------------------------------------
+def multi_day(source, slug, metric, values, meta=None):
+    """``values`` are ``(day offset from TODAY, value)`` pairs."""
+    from datetime import timedelta
+
+    return [
+        Reading(
+            source=source,
+            location=slug,
+            date=TODAY + timedelta(days=offset),
+            metric=metric,
+            value=value,
+            meta=dict(meta or {}, **({"issued": TODAY.isoformat()} if offset > 0 else {})),
+        )
+        for offset, value in values
+    ]
+
+
+def test_check_collapses_multi_day_sources(monkeypatch, capsys):
+    """35 days x 9 metrics must not end up in a Telegram message."""
+    monkeypatch.setattr(cli, "_decide", lambda *a, **k: None)
+    station = (
+        multi_day("chmi_station", "valmez", "sra_mm", [(-2, 17.2), (-1, 0.2), (0, 2.3)])
+        + multi_day("chmi_station", "valmez", "t_mean", [(-2, 16.0), (-1, 15.0), (0, 14.2)])
+        + multi_day("chmi_station", "valmez", "api30_mm", [(-2, 5.0), (-1, 20.3)])
+        + multi_day("chmi_station", "valmez", "rh", [(-1, 81.0)])
+    )
+    forecast = multi_day(
+        "openmeteo", "valmez", "precip_mm", [(0, 0.0), (1, 1.0), (3, 9.8), (5, 0.4)]
+    ) + multi_day("api30_forecast", "valmez", "api30_mm", [(0, 19.0), (2, 24.0), (4, 31.0)])
+    use_fetchers(
+        monkeypatch,
+        [
+            fake_module("chmi_station", readings=station),
+            fake_module("openmeteo", readings=forecast[:4]),
+            fake_module("api30_forecast", readings=forecast[4:]),
+        ],
+    )
+    assert cli.main(["check"]) == 0
+    line = next(l for l in capsys.readouterr().out.splitlines() if "Meziříčí" in l)
+    assert len(line) < 250, line
+    # one value per station metric, the newest one
+    assert "sra_mm 2.3 mm" in line and "t_mean 14.2 °C" in line
+    assert "api30_mm 20 mm" in line and "rh 81 %" in line
+    assert line.count("sra_mm") == 1 and line.count("t_mean") == 1
+    # ... and a summary, not a dump, for the two curves
+    assert "nejbližší ≥5 mm 10 mm" in line
+    assert "API30 dnes 19 mm, max 31 mm" in line and "práh 25 mm" in line
+
+
+def test_status_renders_the_rules_line(monkeypatch, capsys):
+    use_fetchers(
+        monkeypatch,
+        [
+            fake_module("chmi_map", readings=[reading("chmi_map", "valmez", "level", 3)]),
+            fake_module(
+                "chmi_station",
+                readings=multi_day(
+                    "chmi_station", "valmez", "sra_mm", [(-2, 17.2), (-1, 0.2), (0, 2.3)]
+                )
+                + multi_day("chmi_station", "valmez", "api30_mm", [(-1, 20.3)]),
+            ),
+        ],
+    )
+    cli.main(["check"])
+    capsys.readouterr()
+    assert cli.main(["status"]) == 0
+    out = capsys.readouterr().out
+    assert "ČHMÚ 3/5" in out and "stanice API30 20 mm" in out and "SRA 3d 20 mm" in out
+
+
+def test_status_weekly_does_not_crash(capsys):
+    assert cli.main(["status", "--weekly"]) == 0
+    assert "TODO" in capsys.readouterr().out

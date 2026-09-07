@@ -32,6 +32,9 @@ BACKOFF_SECONDS = 2.0
 
 _SAFE = re.compile(r"[^A-Za-z0-9._-]+")
 
+#: How much of the URL survives in a fixture file name (the rest is the hash).
+STEM_LIMIT = 80
+
 
 class Http:
     """``requests.Session`` with a UA, a timeout and one retry on 5xx."""
@@ -128,14 +131,20 @@ class Http:
 
     @staticmethod
     def fixture_name(url: str, params: dict[str, Any] | None = None) -> str:
-        """Stable, filesystem-safe name for the response to ``url``."""
-        stem = _SAFE.sub("_", url.split("://", 1)[-1]).strip("_")[:80]
-        if params:
-            digest = hashlib.sha1(
-                repr(sorted(params.items())).encode("utf-8")
-            ).hexdigest()[:8]
-            stem = f"{stem}-{digest}"
-        return f"{stem}.raw"
+        """Stable, filesystem-safe name for the response to ``url``.
+
+        The readable part is truncated to :data:`STEM_LIMIT` characters, so
+        it alone does **not** identify the request: the ČHMÚ daily files
+        differ only in the ``YYYYMM`` tail that the truncation eats
+        (``…daily_dly-0-203-0-41101084001-202608`` and ``…-202609`` share
+        their first 80 characters).  The 8-hex digest of the *full* URL plus
+        the params is therefore always appended, params or not.
+        """
+        stem = _SAFE.sub("_", url.split("://", 1)[-1]).strip("_")[:STEM_LIMIT]
+        digest = hashlib.sha1(
+            (url + "\n" + repr(sorted((params or {}).items()))).encode("utf-8")
+        ).hexdigest()[:8]
+        return f"{stem}-{digest}.raw"
 
 
 def _default_record_dir() -> Path:

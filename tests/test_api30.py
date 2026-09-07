@@ -216,9 +216,23 @@ def test_crossing_ignores_a_dip_after_the_first_crossing():
 
 
 def test_crossing_uses_the_default_threshold():
-    curve = [(TODAY + timedelta(days=i), v) for i, v in enumerate([10, 41])]
+    curve = [(TODAY + timedelta(days=i), v) for i, v in enumerate([10, 26])]
     assert m.crossing(curve, today=TODAY) == TODAY + timedelta(days=1)
-    assert m.DEFAULT_THRESHOLD_MM == 40.0
+    # PLAN's 40 mm was refuted by the station (20.3 mm on a 3/5 day); 25 mm
+    # is provisional and overridable from the environment.
+    assert m.DEFAULT_THRESHOLD_MM == 25.0
+
+
+def test_threshold_from_the_environment(monkeypatch):
+    monkeypatch.delenv(m.THRESHOLD_ENV, raising=False)
+    assert m.threshold_mm() == m.DEFAULT_THRESHOLD_MM
+    assert m.threshold_mm(default=12.5) == 12.5
+    monkeypatch.setenv(m.THRESHOLD_ENV, "31.5")
+    assert m.threshold_mm() == 31.5
+    assert m.threshold_mm(default=12.5) == 31.5
+    for junk in ("", "  ", "wet", "0", "-3"):
+        monkeypatch.setenv(m.THRESHOLD_ENV, junk)
+        assert m.threshold_mm() == m.DEFAULT_THRESHOLD_MM
 
 
 # ----------------------------------------------------------------------

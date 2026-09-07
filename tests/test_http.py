@@ -92,12 +92,27 @@ def test_does_not_retry_on_4xx():
 
 def test_fixture_name_is_stable_and_safe():
     name = Http.fixture_name("https://houbymapa.cz/predikce")
-    assert name == "houbymapa.cz_predikce.raw"
+    assert name == "houbymapa.cz_predikce-fb12f427.raw"
+    assert name == Http.fixture_name("https://houbymapa.cz/predikce")  # stable
     a = Http.fixture_name("https://api.test/f", {"lat": 49.0, "lon": 18.0})
     b = Http.fixture_name("https://api.test/f", {"lon": 18.0, "lat": 49.0})
     c = Http.fixture_name("https://api.test/f", {"lat": 50.0, "lon": 18.0})
     assert a == b and a != c
     assert "/" not in a
+
+
+def test_fixture_name_does_not_collide_on_a_long_url():
+    """The ČHMÚ daily files differ only past the 80-character truncation."""
+    base = (
+        "https://opendata.chmi.cz/meteorology/climate/recent/data/daily/"
+        "dly-0-203-0-41101084001-"
+    )
+    august = Http.fixture_name(base + "202608.json")
+    september = Http.fixture_name(base + "202609.json")
+    assert august[:80] == september[:80]  # the readable part is identical...
+    assert august != september  # ...and the appended digest saves us
+    # a params-less URL is hashed too, so every name has the same shape
+    assert len(august.split("-")[-1]) == len("deadbeef.raw")
 
 
 def test_recording_is_off_by_default(monkeypatch, tmp_path):

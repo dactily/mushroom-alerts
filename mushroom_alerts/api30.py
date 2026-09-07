@@ -40,14 +40,30 @@ Splicing observations with a forecast
 -------------------------------------
 :func:`extend_series` merges a station SRA series with an Open-Meteo one:
 the station wins wherever it has a value, the forecast fills yesterday /
-today (the daily station file lags ~1 day) and every day ahead.  Note that
-the two are not the same quantity -- see the module-level warning in
-``fetch_openmeteo`` -- so the extended curve is a projection, not a
-measurement.
+today (the daily station file lags ~1 day) and every day ahead.
+
+The two are not the same quantity, in two ways, and both are deliberate
+approximations:
+
+* **Different day windows.**  Station ``SRA`` dated *D* covers
+  ``[D 06:00Z, D+1 06:00Z)``; Open-Meteo ``precip_mm`` dated *D* is the
+  calendar day *D* in Europe/Prague.  They overlap by 18 h.  The merge maps
+  Open-Meteo day *D* onto station day *D* with **no shift** -- the
+  alternative (splitting each model day between two station days) would
+  invent sub-daily structure the daily API has never had, and the residual
+  error is far smaller than the next point.
+* **Different magnitude.**  Measured 2026-09-07 over 62 days at Valašské
+  Meziříčí, Open-Meteo totals 184.6 mm against the gauge's 96.8 mm -- about
+  1.9x wet, with per-day correlation 0.24 (0.82 on 5-day blocks).
+
+So the extended curve is a projection, not a measurement: keep the station
+authoritative for every day it covers (which is what this function does)
+and read the tail as indicative.
 """
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import Iterable, Mapping
@@ -60,6 +76,8 @@ __all__ = [
     "LAG_OFFSET",
     "MAX_GAPS",
     "DEFAULT_THRESHOLD_MM",
+    "THRESHOLD_ENV",
+    "threshold_mm",
     "PLAN_DECAY",
     "PLAN_LAG_OFFSET",
     "FORECAST_SOURCE",
@@ -91,19 +109,25 @@ LAG_OFFSET = 0
 #: More than this many missing days inside the window -> refuse to guess.
 MAX_GAPS = 3
 
-#: Starting trigger threshold, PLAN §3 trigger 4.
+#: Provisional trigger threshold, PLAN §3 trigger 4.
 #:
-#: **Treat 40 mm as unverified.**  PLAN §3 justifies it with "API30 = 41 mm
-#: on 2026-09-07 corresponds to ČHMÚ level 3/5", but the station actually
-#: published API30 = 20.3 mm for 2026-09-06 at Valašské Meziříčí (17.0 mm
-#: at Valašská Bystřice) on the very day the ČHMÚ map showed 3/5.  The
-#: PLAN number is roughly double the real one, so a 40 mm gate would have
-#: stayed shut through the whole 2026 season measured here (the live
-#: 16-day curve of 2026-09-07 peaks at 26.9 mm).  Recalibrate from SQLite
-#: as PLAN §3 says -- pick the threshold that best separates days with
-#: ČHMÚ level >= 4 from days with level <= 3 -- and until then expect
-#: something closer to 25-30 mm.
-DEFAULT_THRESHOLD_MM = 40.0
+#: **PLAN's 40 mm was wrong and is gone.**  PLAN §3 justified it with
+#: "API30 = 41 mm on 2026-09-07 corresponds to ČHMÚ level 3/5", but the
+#: station actually published API30 = 20.3 mm for 2026-09-06 at Valašské
+#: Meziříčí (17.0 mm at Valašská Bystřice) on the very day the ČHMÚ map
+#: showed 3/5 for both.  The PLAN number is roughly double the real one, so
+#: a 40 mm gate would have stayed shut through the whole 2026 season
+#: measured here (the live 16-day curve of 2026-09-07 peaks at 26.9 mm).
+#:
+#: 25 mm is a provisional value: a bit above the 20 mm that scored 3/5, low
+#: enough for the forecast curve to reach it.  Calibration against the ČHMÚ
+#: map levels accumulating in SQLite is still pending (PLAN §3/§5): pick the
+#: threshold that best separates days with level >= 4 from days with <= 3.
+#: Override without editing code via ``$MUSHROOM_API30_THRESHOLD``.
+DEFAULT_THRESHOLD_MM = 25.0
+
+#: Environment variable that overrides :data:`DEFAULT_THRESHOLD_MM`.
+THRESHOLD_ENV = "MUSHROOM_API30_THRESHOLD"
 
 #: The PLAN §5 variant, kept so the difference can be reproduced in tests.
 PLAN_DECAY = 0.92
@@ -117,6 +141,23 @@ METRIC = "api30_mm"
 T_MEAN_MIN = 8.0
 T_MEAN_MAX = 22.0
 T_MIN_ABOVE = 2.0
+
+
+def threshold_mm(default: float | None = None) -> float:
+    """The API30 trigger threshold: ``$MUSHROOM_API30_THRESHOLD`` or default.
+
+    Junk in the environment is ignored rather than fatal -- a typo in a cron
+    line must not silence the alerts.
+    """
+    raw = os.environ.get(THRESHOLD_ENV)
+    fallback = DEFAULT_THRESHOLD_MM if default is None else float(default)
+    if raw is None or not raw.strip():
+        return fallback
+    try:
+        value = float(raw.strip())
+    except ValueError:
+        return fallback
+    return value if value > 0 else fallback
 
 
 @dataclass(frozen=True, slots=True)
