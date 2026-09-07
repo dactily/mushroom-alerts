@@ -86,11 +86,14 @@ __all__ = [
     "T_MEAN_MAX",
     "T_MIN_ABOVE",
     "Api30",
+    "MergedSeries",
     "weights",
     "api30",
     "api30_detail",
     "extend_series",
+    "merge_series",
     "forecast_api30",
+    "forecast_api30_details",
     "crossing",
     "to_readings",
     "temp_ok",
@@ -171,9 +174,19 @@ class Api30:
     missing: tuple[date, ...] = ()
     forecast_days: int = 0
     """How many days of the window came from a forecast, if known."""
+    model_weight_fraction: float = 0.0
+    """Share of the available recency weights backed by model values."""
 
     def __float__(self) -> float:  # convenience for arithmetic/tests
         return self.value
+
+
+@dataclass(frozen=True, slots=True)
+class MergedSeries:
+    """Values plus the dates filled by the model."""
+
+    values: dict[date, float]
+    forecast_days: frozenset[date]
 
 
 def weights(
@@ -203,19 +216,24 @@ def api30_detail(
     total = 0.0
     missing: list[date] = []
     n_forecast = 0
+    available_weight = 0.0
+    forecast_weight = 0.0
     for j in range(1, window + 1):
         d = day - timedelta(days=j)
         value = series.get(d)
         if value is None:
             missing.append(d)
             continue
+        weight = decay ** (j - lag_offset)
         try:
-            total += float(value) * decay ** (j - lag_offset)
+            total += float(value) * weight
         except (TypeError, ValueError):
             missing.append(d)
             continue
+        available_weight += weight
         if d in forecast:
             n_forecast += 1
+            forecast_weight += weight
     if len(missing) > max_gaps:
         return None
     return Api30(
@@ -224,6 +242,7 @@ def api30_detail(
         gaps=len(missing),
         missing=tuple(sorted(missing)),
         forecast_days=n_forecast,
+        model_weight_fraction=(forecast_weight / available_weight if available_weight else 0.0),
     )
 
 
@@ -256,16 +275,28 @@ def extend_series(
     Entries whose value is ``None`` are dropped from both sides, so a
     forecast can fill a hole the station left behind.
     """
+    return merge_series(observed, forecast).values
+
+
+def merge_series(
+    observed: Mapping[date, float], forecast: Mapping[date, float]
+) -> MergedSeries:
+    """Merge values and retain which dates came from the model."""
     out: dict[date, float] = {}
+    model_days: set[date] = set()
     for source in (forecast, observed):
         for day, value in source.items():
             if value is None:
                 continue
             try:
                 out[day] = float(value)
+                if source is forecast:
+                    model_days.add(day)
+                else:
+                    model_days.discard(day)
             except (TypeError, ValueError):
                 continue
-    return out
+    return MergedSeries(out, frozenset(model_days))
 
 
 def forecast_api30(
@@ -289,20 +320,48 @@ def forecast_api30(
     Days whose window is too gappy are skipped rather than guessed, so the
     caller can still use the part of the curve that is trustworthy.
     """
-    series = extend_series(observed, forecast)
-    curve: list[tuple[date, float]] = []
-    for offset in range(0, horizon + 1):
-        day = today + timedelta(days=offset)
-        value = api30(
-            series,
-            day,
+    return [
+        (detail.date, detail.value)
+        for detail in forecast_api30_details(
+            observed,
+            forecast,
+            today=today,
+            horizon=horizon,
             window=window,
             decay=decay,
             lag_offset=lag_offset,
             max_gaps=max_gaps,
         )
-        if value is not None:
-            curve.append((day, value))
+    ]
+
+
+def forecast_api30_details(
+    observed: Mapping[date, float],
+    forecast: Mapping[date, float],
+    *,
+    today: date,
+    horizon: int = 16,
+    window: int = WINDOW,
+    decay: float = DECAY,
+    lag_offset: int = LAG_OFFSET,
+    max_gaps: int = MAX_GAPS,
+) -> list[Api30]:
+    """Detailed curve with gaps and model provenance for every point."""
+    merged = merge_series(observed, forecast)
+    curve: list[Api30] = []
+    for offset in range(0, horizon + 1):
+        day = today + timedelta(days=offset)
+        detail = api30_detail(
+            merged.values,
+            day,
+            window=window,
+            decay=decay,
+            lag_offset=lag_offset,
+            max_gaps=max_gaps,
+            forecast_days=merged.forecast_days,
+        )
+        if detail is not None:
+            curve.append(detail)
     return curve
 
 
@@ -333,7 +392,7 @@ def crossing(
 
 
 def to_readings(
-    curve: Iterable[tuple[date, float]],
+    curve: Iterable[tuple[date, float] | Api30],
     location_slug: str,
     *,
     today: date,
@@ -348,8 +407,26 @@ def to_readings(
     the forecast-error archive.
     """
     readings: list[Reading] = []
-    for day, value in sorted(curve):
-        meta: dict[str, object] = {"threshold_mm": threshold, "decay": DECAY, "window": WINDOW}
+    normalized = sorted(
+        ((item.date, item.value, item) if isinstance(item, Api30) else (item[0], item[1], None))
+        for item in curve
+    )
+    for day, value, detail in normalized:
+        meta: dict[str, object] = {
+            "threshold_mm": threshold,
+            "decay": DECAY,
+            "window": WINDOW,
+        }
+        if detail is not None:
+            meta.update(
+                {
+                    "gaps": detail.gaps,
+                    "missing": [d.isoformat() for d in detail.missing],
+                    "model_days": detail.forecast_days,
+                    "model_weight_fraction": round(detail.model_weight_fraction, 6),
+                    "quality": "partial" if detail.gaps else "fresh",
+                }
+            )
         if day > today:
             meta["issued"] = today.isoformat()
             meta["horizon_days"] = (day - today).days

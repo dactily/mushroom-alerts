@@ -428,21 +428,25 @@ def derive_api30(
     if forecast_result is None or not forecast_result.ok:
         return []
     since = today - timedelta(days=HISTORY_DAYS)
-    observed = {
-        r.date: float(r.value)
-        for r in store.series(STATION, location.slug, "sra_mm", since=since, until=today)
-    }
+    observed = {}
+    for reading in store.series(
+        STATION, location.slug, "sra_mm", since=since, until=today
+    ):
+        meta = reading.meta or {}
+        if meta.get("provisional") and not meta.get("complete"):
+            continue
+        observed[reading.date] = float(reading.value)
     if not observed:
         return []
     forecast = openmeteo.series(forecast_result.readings, location.slug, "precip_mm")
     if not forecast:
         return []
-    curve = api30_lib.forecast_api30(observed, forecast, today=today)
-    if curve:
+    details = api30_lib.forecast_api30_details(observed, forecast, today=today)
+    if details:
         store.upsert_readings(
-            api30_lib.to_readings(curve, location.slug, today=today, threshold=threshold)
+            api30_lib.to_readings(details, location.slug, today=today, threshold=threshold)
         )
-    return curve
+    return [(detail.date, detail.value) for detail in details]
 
 
 # ----------------------------------------------------------------------

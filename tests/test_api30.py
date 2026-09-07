@@ -139,6 +139,7 @@ def test_forecast_days_are_counted():
     marked = [day - timedelta(days=j) for j in (1, 2, 3)]
     detail = m.api30_detail(series, day, forecast_days=marked)
     assert detail is not None and detail.forecast_days == 3
+    assert 0 < detail.model_weight_fraction < 1
 
 
 # ----------------------------------------------------------------------
@@ -150,6 +151,13 @@ def test_extend_series_prefers_the_station():
     forecast = {d1: 0.0, d2: 2.8, d3: 9.8}
     merged = m.extend_series(observed, forecast)
     assert merged == {d1: 2.3, d2: 0.2, d3: 9.8}
+
+
+def test_merge_series_retains_model_provenance():
+    d1, d2 = date(2026, 9, 5), date(2026, 9, 6)
+    merged = m.merge_series({d1: 1.0}, {d1: 9.0, d2: 3.0})
+    assert merged.values == {d1: 1.0, d2: 3.0}
+    assert merged.forecast_days == frozenset({d2})
 
 
 def test_extend_series_lets_a_forecast_fill_a_station_hole():
@@ -176,6 +184,18 @@ def test_forecast_api30_spans_today_to_horizon():
     assert curve == sorted(curve)
     # a uniform 1 mm/day past decays away once the forecast is dry
     assert curve[0][1] > curve[-1][1]
+
+
+def test_detailed_curve_reports_model_weight():
+    observed = {TODAY - timedelta(days=j): 0.0 for j in range(1, 31)}
+    details = m.forecast_api30_details(
+        observed, {TODAY: 30.0}, today=TODAY, horizon=1
+    )
+    tomorrow = details[-1]
+    assert tomorrow.date == TODAY + timedelta(days=1)
+    assert tomorrow.value == pytest.approx(27.9)
+    assert tomorrow.forecast_days == 1
+    assert tomorrow.model_weight_fraction > 0
 
 
 def test_forecast_api30_skips_days_it_cannot_compute():
@@ -267,6 +287,23 @@ def test_to_readings_keys_are_unique():
 def test_to_readings_meta_is_json_serialisable():
     readings = m.to_readings([(TODAY, 12.0)], "valmez", today=TODAY)
     assert json.loads(readings[0].meta_json())["window"] == m.WINDOW
+
+
+def test_to_readings_persists_detailed_provenance():
+    detail = m.Api30(
+        TODAY,
+        12.0,
+        gaps=1,
+        missing=(TODAY - timedelta(days=3),),
+        forecast_days=2,
+        model_weight_fraction=0.25,
+    )
+    reading = m.to_readings([detail], "valmez", today=TODAY)[0]
+    assert reading.meta["gaps"] == 1
+    assert reading.meta["missing"] == [(TODAY - timedelta(days=3)).isoformat()]
+    assert reading.meta["model_days"] == 2
+    assert reading.meta["model_weight_fraction"] == 0.25
+    assert reading.meta["quality"] == "partial"
 
 
 # ----------------------------------------------------------------------

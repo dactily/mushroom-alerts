@@ -325,6 +325,56 @@ def test_derive_api30_writes_the_curve(store):
     assert [row["target_date"] for row in archived][0] == (TODAY + timedelta(days=1)).isoformat()
 
 
+def test_derive_api30_uses_model_instead_of_incomplete_station_day(store):
+    history = [
+        r("chmi_station", "sra_mm", 0.0, TODAY - timedelta(days=n))
+        for n in range(1, 31)
+    ]
+    history.append(
+        r(
+            "chmi_station",
+            "sra_mm",
+            0.0,
+            TODAY,
+            provisional=True,
+            complete=False,
+            until="2026-09-07T08:00:00+00:00",
+        )
+    )
+    store.upsert_readings(history)
+    forecast = result(
+        "openmeteo",
+        [r("openmeteo", "precip_mm", 30.0, TODAY, provisional=True)],
+    )
+    curve = rules.derive_api30(store, VALMEZ, forecast, today=TODAY, threshold=25.0)
+    assert dict(curve)[TODAY + timedelta(days=1)] == pytest.approx(27.9)
+    row = store.conn.execute(
+        """SELECT value, meta_json FROM readings
+           WHERE source='api30_forecast' AND location='valmez'
+             AND metric='api30_mm' AND date=?""",
+        ((TODAY + timedelta(days=1)).isoformat(),),
+    ).fetchone()
+    assert row["value"] == pytest.approx(27.9)
+    assert json.loads(row["meta_json"])["model_days"] == 1
+
+
+def test_derive_api30_complete_station_day_still_wins(store):
+    history = [
+        r("chmi_station", "sra_mm", 0.0, TODAY - timedelta(days=n))
+        for n in range(1, 31)
+    ]
+    history.append(
+        r("chmi_station", "sra_mm", 0.0, TODAY, provisional=True, complete=True)
+    )
+    store.upsert_readings(history)
+    forecast = result(
+        "openmeteo",
+        [r("openmeteo", "precip_mm", 30.0, TODAY, provisional=True)],
+    )
+    curve = rules.derive_api30(store, VALMEZ, forecast, today=TODAY, threshold=25.0)
+    assert dict(curve)[TODAY + timedelta(days=1)] == pytest.approx(0.0)
+
+
 def test_derive_api30_skips_without_station_history(store):
     assert rules.derive_api30(
         store, VALMEZ, openmeteo_result(), today=TODAY, threshold=25.0
