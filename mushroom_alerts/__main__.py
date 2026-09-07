@@ -1,4 +1,4 @@
-"""CLI: ``python -m mushroom_alerts check|status|add|list|del``.
+"""CLI: ``python -m mushroom_alerts check|brief|status|add|list|del``.
 
 Exit-code contract for Hermes (PLAN §2)::
 
@@ -16,6 +16,11 @@ API30 forecast curve on top of what was just written.  Without a ``rules``
 module the CLI falls back to printing one collapsed snapshot line per
 location and exiting 0.
 
+``brief`` runs the very same pipeline (:func:`run_pipeline` + :func:`_decide`)
+and then prints the facts at length instead of collapsing them: it is what
+Hermes Agent reads and interprets (PLAN §2b, ``mushroom_alerts/brief.py``,
+``hermes/PROMPT.md``).  It always exits ``0`` unless every source failed.
+
 ``status`` never fetches: it renders what is in SQLite, through
 ``rules.describe`` when that is importable and through ``format_snapshot``
 otherwise.
@@ -31,6 +36,7 @@ import os
 import pkgutil
 import sys
 import traceback
+from dataclasses import dataclass
 from datetime import date
 from typing import Any, Iterable, Sequence
 
@@ -281,6 +287,47 @@ def _reading_dict(r: Reading) -> dict[str, Any]:
 # ----------------------------------------------------------------------
 # commands
 # ----------------------------------------------------------------------
+@dataclass(slots=True)
+class Pipeline:
+    """One fetch+store pass: what ``check`` and ``brief`` both start from."""
+
+    results: list[FetchResult]
+    notes: list[str]
+    all_failed: bool
+
+
+def run_pipeline(
+    locations: list[Location],
+    *,
+    store: Store,
+    http: Http,
+    today: date,
+    only: Sequence[str] | None = None,
+) -> Pipeline | None:
+    """Fetch every source, upsert the readings, cache derived params.
+
+    ``None`` means there was nothing to run (no fetcher matched), which the
+    callers turn into exit 1.  The order matters and is shared on purpose:
+    the triggers and the brief both ask the store what yesterday looked
+    like, so the readings of this run must be in it first.
+    """
+    for loc in locations:
+        store.sync_location(loc)
+    results = run_fetchers(locations, http=http, today=today, only=only)
+    if not results:
+        return None
+    for result in results:
+        store.upsert_readings(result.readings)
+    cache_params(store, results)
+    return Pipeline(
+        results=results,
+        notes=[
+            f"{SOURCE_LABELS.get(r.source, r.source)}: {r.error}" for r in results if r.error
+        ],
+        all_failed=all(not r.ok for r in results),
+    )
+
+
 def cmd_check(args: argparse.Namespace) -> int:
     today = date.today()
     locations = load_locations()
@@ -290,19 +337,11 @@ def cmd_check(args: argparse.Namespace) -> int:
 
     only = args.only.split(",") if args.only else None
     with Http() as http, Store() as store:
-        for loc in locations:
-            store.sync_location(loc)
-        results = run_fetchers(locations, http=http, today=today, only=only)
-        if not results:
+        run = run_pipeline(locations, store=store, http=http, today=today, only=only)
+        if run is None:
             print("no fetchers available", file=sys.stderr)
             return EXIT_ERROR
-        for result in results:
-            store.upsert_readings(result.readings)
-        cache_params(store, results)
-
-        failures = [r for r in results if not r.ok]
-        notes = [f"{SOURCE_LABELS.get(r.source, r.source)}: {r.error}" for r in results if r.error]
-        all_failed = len(failures) == len(results)
+        results, notes, all_failed = run.results, run.notes, run.all_failed
 
         decision = _decide(locations, results, store=store, today=today)
         if decision is None:  # no rules module yet -> plain snapshot
@@ -354,6 +393,48 @@ def cmd_check(args: argparse.Namespace) -> int:
             for note in notes:
                 print(f"⚠ {note}", file=stream)
         return decision.exit_code
+
+
+def cmd_brief(args: argparse.Namespace) -> int:
+    """The Hermes brief: same pipeline as ``check``, facts instead of a verdict.
+
+    Exit code is always ``0`` -- the brief is meant to be read, not keyed
+    off -- except when *every* source failed, which is exit ``1`` like
+    everywhere else.  Partial failure is fine: the dead source becomes a
+    line in "сбои источников" and the stored values still get printed.
+    """
+    from . import brief as brief_lib
+
+    today = date.today()
+    locations = load_locations()
+    if not locations:
+        print(f"no locations configured ({locations_path()})", file=sys.stderr)
+        return EXIT_ERROR
+
+    with Http() as http, Store() as store:
+        run = run_pipeline(locations, store=store, http=http, today=today)
+        if run is None:
+            print("no fetchers available", file=sys.stderr)
+            return EXIT_ERROR
+        # The decision is what derives and stores the API30 curve and names
+        # the triggers that fired; the brief only reports them.
+        decision = _decide(locations, run.results, store=store, today=today)
+        payload = brief_lib.build(
+            store,
+            locations,
+            today,
+            days=max(int(getattr(args, "days", brief_lib.DEFAULT_DAYS) or 0), 0),
+            decision_data=None if decision is None else decision.data,
+            notes=run.notes,
+            failed_sources=[r.source for r in run.results if not r.ok],
+        )
+
+    if args.json:
+        payload = dict(brief_lib.to_json(payload), exit_code=EXIT_ERROR if run.all_failed else EXIT_SILENT)
+        print(jsonlib.dumps(payload, ensure_ascii=False, indent=2))
+    else:
+        print(brief_lib.render(payload), end="")
+    return EXIT_ERROR if run.all_failed else EXIT_SILENT
 
 
 def _decide(
@@ -498,6 +579,19 @@ def build_parser() -> argparse.ArgumentParser:
     p_check.add_argument("--json", action="store_true", help="machine-readable output")
     p_check.add_argument("--only", metavar="SOURCE,...", help="restrict to these sources")
     p_check.set_defaults(func=cmd_check)
+
+    p_brief = sub.add_parser(
+        "brief", help="fetch, store, print the full fact brief for Hermes"
+    )
+    p_brief.add_argument("--json", action="store_true", help="machine-readable output")
+    p_brief.add_argument(
+        "--days",
+        type=int,
+        default=16,
+        metavar="N",
+        help="forecast horizon in days (default 16, Open-Meteo's maximum)",
+    )
+    p_brief.set_defaults(func=cmd_brief)
 
     p_status = sub.add_parser("status", help="print the last stored snapshot")
     p_status.add_argument("--json", action="store_true")

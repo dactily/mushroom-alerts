@@ -3,11 +3,14 @@
 Daily mushroom-growth signal for a handful of places around Valašské
 Meziříčí, assembled from the ČHMÚ growth-probability raster, HoubyMapa, ČHMÚ
 station open data and Open-Meteo -- plus an API30 rain index projected 16
-days ahead, which none of the upstreams offers.  No LLM, no bot of its own:
-it is a CLI that Hermes runs from cron and whose stdout it forwards to
-Telegram.  See `PLAN.md` for the whole design, `mushroom_alerts/base.py` for
-the contract every source module follows, and `mushroom_alerts/rules.py` for
-the triggers.
+days ahead, which none of the upstreams offers.  No bot of its own: it is a
+CLI that Hermes Agent runs from cron.  `brief` prints the facts and Hermes
+turns them into a sentence ("how likely now, and when does it become
+likely"); `check` keeps the deterministic exit-code contract for when no
+interpretation is wanted.  Nothing here calls an LLM.  See `PLAN.md` for
+the whole design, `hermes/PROMPT.md` for the text pasted into the Hermes
+cron job, `mushroom_alerts/base.py` for the contract every source module
+follows, and `mushroom_alerts/rules.py` for the triggers.
 
 ## Install
 
@@ -22,6 +25,11 @@ python3 -m venv .venv
 .venv/bin/python -m mushroom_alerts check            # fetch, store, decide
 .venv/bin/python -m mushroom_alerts check --json     # machine-readable
 .venv/bin/python -m mushroom_alerts check --only chmi_map,houbymapa
+
+.venv/bin/python -m mushroom_alerts brief            # facts for Hermes to read
+.venv/bin/python -m mushroom_alerts brief --json
+.venv/bin/python -m mushroom_alerts brief --days 7   # shorter forecast table
+
 .venv/bin/python -m mushroom_alerts status           # last stored snapshot
 .venv/bin/python -m mushroom_alerts status --json
 
@@ -56,10 +64,28 @@ Exit `1` means the script itself crashed, or **every** source failed.  One
 dead source is not an error: it becomes a `⚠ source: reason` line on stderr
 and the rest of the run carries on (PLAN §6).
 
-`status`, `list`, `add` and `del` exit `0` on success and `1` on a usage
-error.  With no trigger firing, `check` still prints the snapshot (handy by
+`brief`, `status`, `list`, `add` and `del` exit `0` on success and `1` on a
+usage error.  With no trigger firing, `check` still prints the snapshot (handy by
 hand, ignored by Hermes) and exits `0`.  Re-running `check` on the same day
 is idempotent: same text, same exit code, no duplicate rows.
+
+## The Hermes brief
+
+```sh
+.venv/bin/python -m mushroom_alerts brief
+```
+
+Runs the same fetch/store/decide pipeline as `check`, then prints ~3 KB per
+location of plain facts in Russian: ČHMÚ map level with its change against
+yesterday and a week ago, HoubyMapa, station API30 / SRA over 1-3-7-30 days
+/ temperatures / soil / humidity, a 14-day history table, a 16-day forecast
+table with the derived API30 curve and its threshold crossing, the
+deterministic triggers that fired, the sources that failed, and a stable
+"Как читать" cheat sheet.  It draws **no** conclusion -- that is Hermes
+Agent's job; paste `hermes/PROMPT.md` into its 08:30 cron task.  `--days N`
+shortens the forecast table, `--json` gives the same content as a dict
+(including `check --json`'s per-location decision data).  Exit code is
+always `0` unless every source failed.
 
 ## Configuration
 
