@@ -84,7 +84,7 @@ def test_check_without_a_rules_decision_prints_a_snapshot(monkeypatch, capsys):
     assert cli.main(["check"]) == 0
     out = capsys.readouterr().out
     assert "Valašské Meziříčí" in out and "ČHMÚ 3/5" in out and "HoubyMapa score 0.47" in out
-    assert "Valašská Bystřice: žádná data" in out
+    assert "Valašská Bystřice: нет данных" in out
 
 
 def test_check_returns_10_when_rules_signal(monkeypatch, capsys):
@@ -236,7 +236,7 @@ def test_status_reads_the_store_without_fetching(monkeypatch, capsys):
     assert cli.main(["status"]) == 0
     out = capsys.readouterr().out
     assert "ČHMÚ 4/5" in out
-    assert "Valašská Bystřice: žádná data" in out
+    assert "Valašská Bystřice: нет данных" in out
 
 
 def test_status_json(monkeypatch, capsys):

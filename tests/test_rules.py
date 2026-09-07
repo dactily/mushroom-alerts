@@ -544,7 +544,7 @@ def test_describe_is_one_compact_line(store):
 
 
 def test_describe_without_any_data(store):
-    assert rules.describe(store, BYSTRICE, TODAY).endswith("žádná data")
+    assert rules.describe(store, BYSTRICE, TODAY).endswith("нет данных")
 
 
 def test_decide_survives_a_location_with_no_data_at_all(store):

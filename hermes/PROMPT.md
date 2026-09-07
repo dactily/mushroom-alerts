@@ -1,3 +1,22 @@
+# Hermes: как подключено
+
+Механика Hermes cron (проверено на сервере 2026-09-07):
+- `--script mushroom_brief.sh` — скрипт из `~/.hermes/scripts/` запускается перед агентом, его stdout (наш `brief`) вставляется в промпт. Агенту команды запускать не нужно.
+- `--continuity` — в промпт вставляется вывод предыдущего запуска; это память вердикта, отдельная память не нужна.
+- ответ ровно `[SILENT]` подавляет доставку.
+- время cron — локальное Europe/Prague.
+
+Файлы в этой папке: `mushroom_brief.sh` (обёртка), `daily_prompt.txt` (08:30, ежедневно, с continuity), `friday_prompt.txt` (19:00 пятница, всегда). Установка:
+
+```bash
+cp hermes/mushroom_brief.sh ~/.hermes/scripts/ && chmod 700 ~/.hermes/scripts/mushroom_brief.sh
+HERMES=~/.hermes/hermes-agent/venv/bin/hermes
+$HERMES cron create "30 8 * * *" "$(cat hermes/daily_prompt.txt)" --name mushroom-daily --script mushroom_brief.sh --continuity --deliver telegram:<chat_id>
+$HERMES cron create "0 19 * * 5" "$(cat hermes/friday_prompt.txt)" --name mushroom-weekend --script mushroom_brief.sh --deliver telegram:<chat_id>
+```
+
+Ниже — исходный текст правил, из которого сделаны оба промпта (справочно).
+
 # Промпт для Hermes Agent: ежедневный грибной отчёт
 
 Две cron-задачи Hermes: ежедневная 08:30 Europe/Prague (к этому часу

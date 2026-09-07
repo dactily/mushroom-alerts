@@ -643,7 +643,7 @@ def format_line(
     if extras:
         body = " · ".join([body, *extras]) if body else " · ".join(extras)
     if not body:
-        body = "žádná data"
+        body = "нет данных"
     for note in notes:
         body += f" ({note})"
     return f"🍄 {snap['name']}: {body}"

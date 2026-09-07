@@ -259,7 +259,7 @@ def format_snapshot(
     for r in readings:
         by_source.setdefault(r.source, []).append(r)
     if not by_source:
-        return f"🍄 {location.name}: žádná data"
+        return f"🍄 {location.name}: нет данных"
     order = [s for s in SOURCE_LABELS if s in by_source] + [
         s for s in sorted(by_source) if s not in SOURCE_LABELS
     ]
