@@ -80,6 +80,7 @@ from .base import (
 )
 from .fetch_chmi_map import LEVEL_LABELS
 from .quality import calendar_window
+from . import policy
 from .store import Store
 from .views import location_snapshot
 
@@ -128,12 +129,12 @@ T_API30_CROSS = "api30_cross"
 CHMI_LEVEL = 4.0
 HOUBY_LEVEL = 4.0
 HOUBY_SCORE = 0.6
-RAIN_DAYS = 3
-RAIN_MM = 20.0
-RAIN_T_MIN = 12.0
-RAIN_T_MAX = 22.0
-WINDOW_FROM_DAYS = 7
-WINDOW_TO_DAYS = 12
+RAIN_DAYS = policy.RAIN_EPISODE_DAYS
+RAIN_MM = policy.RAIN_EPISODE_MM
+RAIN_T_MIN = policy.RAIN_T_MEAN_MIN
+RAIN_T_MAX = policy.RAIN_T_MEAN_MAX
+WINDOW_FROM_DAYS = policy.GROWTH_WINDOW_FROM_DAYS
+WINDOW_TO_DAYS = policy.GROWTH_WINDOW_TO_DAYS
 CROSS_SHIFT_DAYS = 2
 CROSS_MAX_AGE_DAYS = 14
 #: Identical news is not repeated for this many days (antispam).
@@ -141,7 +142,7 @@ REPEAT_AFTER_DAYS = 7
 #: A crossing further ahead than this is only "orientačně".
 VAGUE_AFTER_DAYS = 7
 #: Rain worth naming in the forecast summary.
-NEXT_RAIN_MM = 5.0
+NEXT_RAIN_MM = policy.NEXT_RAIN_MM
 #: How much station history the derivation and the rain trigger read.
 HISTORY_DAYS = 45
 

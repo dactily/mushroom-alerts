@@ -157,6 +157,8 @@ def test_render_has_every_section(tmp_path):
     assert "температура за" in text and "средняя" in text
     assert "температура почвы: 5 см 17.6 °C, 10 см 17.7 °C" in text
     assert "влажность: 81 %" in text
+    assert "биологические признаки (без автоматического вердикта):" in text
+    assert "T средняя 7 д:" in text and "динамика API30:" in text
 
     # history table: one line per day, 14 of them
     assert "история 14 дн. (дата | SRA мм | API30 мм | T ср °C):" in text
@@ -179,7 +181,7 @@ def test_render_has_every_section(tmp_path):
     assert text.count("Как читать (справка, стабильный текст):") == 1
     assert "zdroj ČHMÚ (CC BY 4.0)" in text
     assert "15–25 мм умеренно" in text
-    assert "7–12 дней" in text
+    assert "D+7...D+12" in text
     assert "1.9 раза" in text
     assert "hřib, kozák, liška" in text
 

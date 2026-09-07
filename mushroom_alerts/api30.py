@@ -69,6 +69,7 @@ from datetime import date, timedelta
 from typing import Iterable, Mapping
 
 from .base import Reading
+from . import policy
 
 __all__ = [
     "DECAY",
@@ -101,17 +102,17 @@ __all__ = [
 ]
 
 #: Daily decay factor, refitted against the published ČHMÚ values.
-DECAY = 0.93
+DECAY = policy.API30_DECAY
 
 #: How many days before ``t`` contribute.
-WINDOW = 30
+WINDOW = policy.API30_WINDOW_DAYS
 
 #: Weight of lag ``j`` is ``DECAY ** (j - LAG_OFFSET)``.  ČHMÚ uses 0 (so
 #: yesterday already carries ``DECAY``); PLAN §5 assumed 1.
-LAG_OFFSET = 0
+LAG_OFFSET = policy.API30_LAG_OFFSET
 
 #: More than this many missing days inside the window -> refuse to guess.
-MAX_GAPS = 3
+MAX_GAPS = policy.API30_MAX_GAPS
 
 #: Provisional trigger threshold, PLAN §3 trigger 4.
 #:
@@ -128,7 +129,7 @@ MAX_GAPS = 3
 #: map levels accumulating in SQLite is still pending (PLAN §3/§5): pick the
 #: threshold that best separates days with level >= 4 from days with <= 3.
 #: Override without editing code via ``$MUSHROOM_API30_THRESHOLD``.
-DEFAULT_THRESHOLD_MM = 25.0
+DEFAULT_THRESHOLD_MM = policy.API30_THRESHOLD_MM
 
 #: Environment variable that overrides :data:`DEFAULT_THRESHOLD_MM`.
 THRESHOLD_ENV = "MUSHROOM_API30_THRESHOLD"
@@ -143,9 +144,9 @@ METRIC = "api30_mm"
 CALCULATION_VERSION = "api30-v1"
 
 #: Temperature gate of PLAN §3 trigger 4.
-T_MEAN_MIN = 8.0
-T_MEAN_MAX = 22.0
-T_MIN_ABOVE = 2.0
+T_MEAN_MIN = policy.API30_T_MEAN_MIN
+T_MEAN_MAX = policy.API30_T_MEAN_MAX
+T_MIN_ABOVE = policy.API30_T_MIN_ABOVE
 
 
 def threshold_mm(default: float | None = None) -> float:

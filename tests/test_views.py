@@ -99,3 +99,34 @@ def test_partial_location_failure_is_visible_in_shared_view(tmp_path):
         "retrieved_at": None,
         "error": "timeout",
     }
+
+
+def test_biological_features_are_facts_not_a_verdict(tmp_path):
+    readings = []
+    for offset in range(-30, 1):
+        day = TODAY + timedelta(days=offset)
+        readings += [
+            Reading("chmi_station", VALMEZ.slug, day, "sra_mm", 0.0),
+            Reading("chmi_station", VALMEZ.slug, day, "t_mean", 14.0),
+        ]
+    readings += [
+        Reading("chmi_station", VALMEZ.slug, TODAY - timedelta(days=2), "sra_mm", 22.0),
+        Reading("chmi_station", VALMEZ.slug, TODAY - timedelta(days=1), "t_min", -1.0),
+        Reading("chmi_station", VALMEZ.slug, TODAY - timedelta(days=3), "api30_mm", 18.0),
+        Reading("chmi_station", VALMEZ.slug, TODAY, "api30_mm", 21.0),
+    ]
+    with Store(tmp_path / "state.sqlite") as store:
+        store.upsert_readings(readings)
+        bio = location_snapshot(store, VALMEZ, TODAY)["biological"]
+
+    assert bio["temperature_7d"]["mean_c"] == 14.0
+    assert bio["temperature_7d"]["covered_days"] == 7
+    assert bio["frost"]["present"] is True
+    assert bio["rain_episode"]["date"] == TODAY - timedelta(days=2)
+    assert bio["rain_episode"]["growth_window"] == [
+        TODAY + timedelta(days=5),
+        TODAY + timedelta(days=10),
+    ]
+    assert bio["api30_dynamics"]["delta_3d_mm"] == 3.0
+    assert bio["history"]["sufficient"] is True
+    assert "verdict" not in bio

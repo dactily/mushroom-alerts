@@ -8,6 +8,7 @@ from typing import Any, Iterable, Sequence
 from zoneinfo import ZoneInfo
 
 from . import api30 as api30_lib
+from . import policy
 from .base import DataQuality, FetchResult, Location, Reading
 from .fetch_chmi_map import LEVEL_LABELS
 from .quality import calendar_window, point_from_reading, quality_worst
@@ -128,6 +129,95 @@ def _input_openmeteo_run(store: Store, api_run: Any, slug: str) -> Any:
     return None
 
 
+def _biological_features(
+    store: Store,
+    slug: str,
+    today: date,
+    sra_points: dict[date, Any],
+    t_points: dict[date, Any],
+) -> dict[str, Any]:
+    temperature = calendar_window(t_points, today, 7)
+    t_min_rows = store.series(
+        STATION, slug, "t_min", since=today - timedelta(days=6), until=today
+    )
+    frost_row = min(t_min_rows, key=lambda row: float(row.value)) if t_min_rows else None
+
+    rain_episode = None
+    for end in sorted(sra_points, reverse=True):
+        if end > today:
+            continue
+        aggregate = calendar_window(sra_points, end, policy.RAIN_EPISODE_DAYS)
+        if aggregate.total is None or aggregate.total < policy.RAIN_EPISODE_MM:
+            continue
+        first = end - timedelta(days=policy.RAIN_EPISODE_DAYS - 1)
+        episode_days = [day for day in sra_points if first <= day <= end]
+        if not episode_days:
+            continue
+        anchor = max(episode_days, key=lambda day: float(sra_points[day].value))
+        rain_episode = {
+            "date": anchor,
+            "total_mm": round(aggregate.total, 1),
+            "covered_days": aggregate.covered_days,
+            "expected_days": aggregate.expected_days,
+            "quality": aggregate.quality.value,
+            "lower_bound": aggregate.lower_bound,
+            "growth_window": [
+                anchor + timedelta(days=policy.GROWTH_WINDOW_FROM_DAYS),
+                anchor + timedelta(days=policy.GROWTH_WINDOW_TO_DAYS),
+            ],
+        }
+        break
+
+    api_rows = store.series(
+        STATION, slug, "api30_mm", since=today - timedelta(days=7), until=today
+    )
+    api_values = {row.date: float(row.value) for row in api_rows}
+    latest_day = max(api_values) if api_values else None
+    latest = None if latest_day is None else api_values[latest_day]
+
+    def delta(days: int) -> float | None:
+        if latest_day is None or latest_day - timedelta(days=days) not in api_values:
+            return None
+        return round(latest - api_values[latest_day - timedelta(days=days)], 2)
+
+    history = calendar_window(
+        sra_points, today - timedelta(days=1), policy.API30_WINDOW_DAYS
+    )
+    history_gaps = history.expected_days - history.covered_days
+    return {
+        "temperature_7d": {
+            "mean_c": None if temperature.mean is None else round(temperature.mean, 1),
+            "covered_days": temperature.covered_days,
+            "expected_days": temperature.expected_days,
+            "quality": temperature.quality.value,
+        },
+        "frost": {
+            "present": frost_row is not None and float(frost_row.value) <= 0.0,
+            "date": None if frost_row is None else frost_row.date,
+            "minimum_c": None if frost_row is None else float(frost_row.value),
+            "covered_days": len(t_min_rows),
+            "expected_days": 7,
+        },
+        "rain_episode": rain_episode,
+        "api30_dynamics": {
+            "date": latest_day,
+            "value_mm": latest,
+            "delta_1d_mm": delta(1),
+            "delta_3d_mm": delta(3),
+        },
+        "history": {
+            "covered_days": history.covered_days,
+            "expected_days": history.expected_days,
+            "gaps": history_gaps,
+            "quality": history.quality.value,
+            "sufficient": (
+                history_gaps <= policy.API30_MAX_GAPS
+                and history.quality not in {DataQuality.MISSING, DataQuality.STALE}
+            ),
+        },
+    }
+
+
 def forecast_bundle(
     store: Store,
     slug: str,
@@ -207,6 +297,7 @@ def location_snapshot(
         "houbymapa": None,
         "station": None,
         "forecast": None,
+        "biological": None,
         "source_status": {},
     }
 
@@ -243,14 +334,14 @@ def location_snapshot(
     t_rows = store.series(STATION, slug, "t_mean", since=since, until=today)
     sra = {row.date: float(row.value) for row in sra_rows}
     t_mean = {row.date: float(row.value) for row in t_rows}
+    sra_points = {row.date: point_from_reading(row, today) for row in sra_rows}
+    t_points = {row.date: point_from_reading(row, today) for row in t_rows}
     api = store.latest(STATION, slug, "api30_mm")
     status_rows = list(sra_rows)
     if api is not None:
         status_rows.append(api)
     out["source_status"][STATION] = source_status(STATION, status_rows, today)
     if sra or api is not None:
-        sra_points = {row.date: point_from_reading(row, today) for row in sra_rows}
-        t_points = {row.date: point_from_reading(row, today) for row in t_rows}
         rain_window = calendar_window(sra_points, today, rain_days)
         newest_sra = max(sra_rows, key=lambda row: row.date) if sra_rows else None
         last_t = max(t_mean) if t_mean else None
@@ -288,4 +379,11 @@ def location_snapshot(
     if forecast["openmeteo_run_id"] or forecast["api30_run_id"]:
         out["forecast"] = forecast
     _apply_run_status(out["source_status"], results, slug)
+    biological = _biological_features(store, slug, today, sra_points, t_points)
+    biological["rules_version"] = policy.RULES_VERSION
+    biological["input_quality"] = {
+        source: status.get("quality", DataQuality.MISSING.value)
+        for source, status in out["source_status"].items()
+    }
+    out["biological"] = biological
     return out

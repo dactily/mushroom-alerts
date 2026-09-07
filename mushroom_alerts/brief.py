@@ -40,6 +40,7 @@ from typing import Any, Mapping, Sequence
 
 from . import api30 as api30_lib
 from . import rules as rules_lib
+from . import policy
 from .base import FetchResult, Location, SeriesPoint
 from .quality import calendar_window, point_from_reading
 from .store import Store
@@ -79,17 +80,7 @@ API30_FORECAST = rules_lib.API30_FORECAST
 #: Interpretation cheat sheet.  Stable text: Hermes is told to treat it as
 #: authoritative, so it must not drift from run to run.  Numbers in it are
 #: the ones measured during the reconnaissance (PLAN §1, §5, §6).
-CHEAT_SHEET = """Как читать (справка, стабильный текст):
-1. API30 — сумма осадков за 30 дней с затуханием 0.93/сут (формула ČHMÚ, воспроизведена точно).
-2. Ориентировочные полосы API30, НЕ откалиброваны: <15 мм сухо, 15–25 мм умеренно, 25–40 мм хорошо, >40 мм очень влажно.
-3. Опорная точка: 2026-09-06 карта ČHMÚ показывала 3/5 при станционном API30 ≈ 20 мм.
-4. Задержка: от промокания (≥20 мм за 3 дня) до плодоношения проходит 7–12 дней; считать от даты дождя, а не от сегодня.
-5. Благоприятная температура: средняя 10–20 °C, минимум > 5 °C, без заморозков.
-6. Карта ČHMÚ — про микоризные виды (hřib, kozák, liška); опята и дереворазрушающие она не описывает.
-7. Прогноз Open-Meteo в этих точках примерно в 1.9 раза «мокрее» станции, поэтому прогнозный API30 завышен; дальше 7 дней — ненадёжно, говорить «ориентировочно».
-8. HoubyMapa — независимая модель (радар ČHMÚ + Open-Meteo, влажность и температура почвы); совпадение с ČHMÚ усиливает вывод, расхождение — повод для осторожности.
-9. Станция главнее прогноза везде, где у неё есть значение; сегодняшний SRA предварительный (10-минутная лента).
-10. Данные: zdroj ČHMÚ (CC BY 4.0), HoubyMapa.cz, Open-Meteo (CC BY 4.0)."""
+CHEAT_SHEET = policy.interpretation_guide()
 
 
 # ----------------------------------------------------------------------
@@ -351,6 +342,7 @@ def location_view(
         "station": station,
         "history": history,
         "forecast": forecast,
+        "biological": snap.get("biological") or {},
         "source_status": snap.get("source_status") or {},
         "signals": [dict(s) for s in signals],
     }
@@ -468,6 +460,48 @@ def _history_lines(view: Mapping[str, Any]) -> list[str]:
     return out
 
 
+def _biological_lines(view: Mapping[str, Any]) -> list[str]:
+    bio = view.get("biological") or {}
+    temp = bio.get("temperature_7d") or {}
+    frost = bio.get("frost") or {}
+    episode = bio.get("rain_episode")
+    dynamics = bio.get("api30_dynamics") or {}
+    history = bio.get("history") or {}
+    out = ["биологические признаки (без автоматического вердикта):"]
+    out.append(
+        f"  T средняя 7 д: {_n(temp.get('mean_c'))} °C "
+        f"({temp.get('covered_days', 0)}/{temp.get('expected_days', 7)} дн., "
+        f"качество {temp.get('quality', 'missing')})"
+    )
+    if frost.get("minimum_c") is None:
+        out.append("  заморозок 7 д: недостаточно данных")
+    else:
+        marker = "да" if frost.get("present") else "нет"
+        out.append(
+            f"  заморозок 7 д: {marker}; минимум {_n(frost.get('minimum_c'))} °C "
+            f"{_iso(frost.get('date'))}"
+        )
+    if episode:
+        growth = episode.get("growth_window") or [None, None]
+        out.append(
+            f"  дождевой эпизод: {_n(episode.get('total_mm'))} мм, максимум "
+            f"{_iso(episode.get('date'))}; окно D+7...D+12 "
+            f"{_iso(growth[0])}–{_iso(growth[1])}; качество {episode.get('quality')}"
+        )
+    else:
+        out.append("  дождевой эпизод ≥ 20 мм / 3 д: не найден или недостаточно данных")
+    out.append(
+        f"  динамика API30: {_n(dynamics.get('value_mm'))} мм за {_iso(dynamics.get('date'))}, "
+        f"Δ1д {_n(dynamics.get('delta_1d_mm'))} мм, Δ3д {_n(dynamics.get('delta_3d_mm'))} мм"
+    )
+    enough = "достаточна" if history.get("sufficient") else "недостаточна"
+    out.append(
+        f"  история API30: {enough}; покрытие {history.get('covered_days', 0)}/"
+        f"{history.get('expected_days', 30)} дн., разрывов {history.get('gaps', 30)}"
+    )
+    return out
+
+
 def _forecast_lines(view: Mapping[str, Any]) -> list[str]:
     fc = view.get("forecast") or {}
     rows = fc.get("days") or []
@@ -534,6 +568,8 @@ def _render_location(view: Mapping[str, Any], today: date, stamp: str) -> list[s
         "факты сегодня:",
     ]
     lines += _facts_lines(view)
+    lines.append("")
+    lines += _biological_lines(view)
     lines.append("")
     lines += _history_lines(view)
     lines.append("")

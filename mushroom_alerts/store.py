@@ -670,6 +670,40 @@ class Store:
         sql += " ORDER BY target_date, metric"
         return list(self.conn.execute(sql, args))
 
+    def forecast_error_pairs(
+        self,
+        location: str,
+        forecast_source: str,
+        forecast_metric: str,
+        actual_source: str,
+        actual_metric: str,
+    ) -> list[sqlite3.Row]:
+        """Archived predictions paired with later observations."""
+        return list(
+            self.conn.execute(
+                """SELECT fr.run_id, fr.retrieved_at, fp.target_date,
+                          fp.value AS predicted, actual.value AS actual
+                   FROM forecast_runs fr
+                   JOIN forecast_points fp ON fp.run_id=fr.run_id
+                   JOIN readings actual
+                     ON actual.location=fp.location
+                    AND actual.date=fp.target_date
+                    AND actual.issued=''
+                    AND actual.source=?
+                    AND actual.metric=?
+                   WHERE fr.source=? AND fr.status='ok'
+                     AND fp.location=? AND fp.metric=?
+                   ORDER BY fr.retrieved_at, fp.target_date""",
+                (
+                    actual_source,
+                    actual_metric,
+                    forecast_source,
+                    location,
+                    forecast_metric,
+                ),
+            )
+        )
+
 
 def _to_reading(row: sqlite3.Row | None) -> Reading | None:
     if row is None:

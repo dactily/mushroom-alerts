@@ -617,6 +617,20 @@ def cmd_del(args: argparse.Namespace) -> int:
     return EXIT_SILENT
 
 
+def cmd_calibration(args: argparse.Namespace) -> int:
+    """Report archived forecast error without changing data or thresholds."""
+    from . import calibration as calibration_lib
+
+    locations = load_locations()
+    with Store() as store:
+        payload = calibration_lib.build(store, locations)
+    if args.json:
+        print(jsonlib.dumps(payload, ensure_ascii=False, indent=2))
+    else:
+        print(calibration_lib.render(payload, locations), end="")
+    return EXIT_SILENT
+
+
 # ----------------------------------------------------------------------
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -649,6 +663,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--weekly", action="store_true", help="weekly digest (TODO, stage 2)"
     )
     p_status.set_defaults(func=cmd_status)
+
+    p_calibration = sub.add_parser(
+        "calibration", help="show forecast bias and MAE by horizon"
+    )
+    p_calibration.add_argument("--json", action="store_true")
+    p_calibration.set_defaults(func=cmd_calibration)
 
     p_add = sub.add_parser("add", help="add a location to locations.yaml")
     p_add.add_argument("name")
