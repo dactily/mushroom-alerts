@@ -13,7 +13,10 @@ Tables
     Derived-parameter cache keyed by slug (ČHMÚ pixel, HoubyMapa cell,
     nearest stations) -- PLAN §2a.  ``locations.yaml`` stays coordinates-only.
 ``notifications``
-    What we already told the user, for the antispam / state-transition rules.
+    Legacy emission log retained for rollback compatibility.
+``signal_emissions``
+    Signals written to stdout by ``check``.  This is not delivery proof;
+    Hermes owns transport outcomes.
 ``forecasts``
     Rolling forecast archive: what we predicted on day X for day Y, so the
     forecast error by horizon can be measured later (PLAN §3 trigger 4,
@@ -36,7 +39,7 @@ from .base import Location, Reading, utcnow
 __all__ = ["Store", "db_path", "DEFAULT_DB", "SCHEMA_VERSION"]
 
 DEFAULT_DB = "state.sqlite"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS readings (
@@ -119,6 +122,21 @@ CREATE INDEX IF NOT EXISTS forecast_points_lookup
     ON forecast_points (location, source, metric, target_date, run_id);
 """
 
+MIGRATION_2 = """
+CREATE TABLE IF NOT EXISTS signal_emissions (
+    id           INTEGER PRIMARY KEY,
+    date         TEXT NOT NULL,
+    location     TEXT NOT NULL,
+    trigger      TEXT NOT NULL,
+    emission_key TEXT NOT NULL,
+    text_json    TEXT NOT NULL,
+    created_at   TEXT NOT NULL,
+    UNIQUE (date, location, trigger, emission_key)
+);
+CREATE INDEX IF NOT EXISTS signal_emissions_lookup
+    ON signal_emissions (location, trigger, date);
+"""
+
 
 def db_path() -> Path:
     """Where the SQLite file lives (``$MUSHROOM_DB`` or ``./state.sqlite``)."""
@@ -168,6 +186,32 @@ class Store:
             self.conn.executescript(MIGRATION_1)
             self._backfill_legacy_forecasts()
             self.conn.execute("PRAGMA user_version=1")
+            version = 1
+        if version < 2:
+            self.conn.executescript(MIGRATION_2)
+            self._backfill_notifications()
+            self.conn.execute("PRAGMA user_version=2")
+
+    def _backfill_notifications(self) -> None:
+        for row in self.conn.execute("SELECT * FROM notifications ORDER BY id"):
+            try:
+                payload = json.loads(row["text"])
+                emission_key = str(payload.get("key") or row["text"])
+            except (json.JSONDecodeError, TypeError, AttributeError):
+                emission_key = str(row["text"])
+            self.conn.execute(
+                """INSERT OR IGNORE INTO signal_emissions
+                   (date, location, trigger, emission_key, text_json, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (
+                    row["date"],
+                    row["location"],
+                    row["trigger"],
+                    emission_key,
+                    row["text"],
+                    row["created_at"],
+                ),
+            )
 
     def _backfill_legacy_forecasts(self) -> None:
         groups = self.conn.execute(
@@ -465,11 +509,23 @@ class Store:
     def add_notification(
         self, day: date | str, location: str, trigger: str, text: str
     ) -> int:
+        try:
+            payload = json.loads(text)
+            emission_key = str(payload.get("key") or text)
+        except (json.JSONDecodeError, TypeError, AttributeError):
+            emission_key = text
+        created_at = utcnow().isoformat()
         with self.conn:
             cur = self.conn.execute(
                 """INSERT INTO notifications (date, location, trigger, text, created_at)
                    VALUES (?, ?, ?, ?, ?)""",
-                (_iso(day), location, trigger, text, utcnow().isoformat()),
+                (_iso(day), location, trigger, text, created_at),
+            )
+            self.conn.execute(
+                """INSERT OR IGNORE INTO signal_emissions
+                   (date, location, trigger, emission_key, text_json, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (_iso(day), location, trigger, emission_key, text, created_at),
             )
         return int(cur.lastrowid or 0)
 
@@ -478,6 +534,48 @@ class Store:
     ) -> sqlite3.Row | None:
         """Most recent notification row, or ``None``.  Keys: date, text, ..."""
         sql = "SELECT * FROM notifications WHERE location=?"
+        args: list[Any] = [location]
+        if trigger is not None:
+            sql += " AND trigger=?"
+            args.append(trigger)
+        sql += " ORDER BY date DESC, id DESC LIMIT 1"
+        return self.conn.execute(sql, args).fetchone()
+
+    def add_emission(
+        self,
+        day: date | str,
+        location: str,
+        trigger: str,
+        emission_key: str,
+        text_json: str,
+    ) -> bool:
+        """Record stdout emission, not confirmed transport delivery.
+
+        The legacy row is dual-written so an application rollback retains
+        antispam continuity.  Returns ``True`` only for a new emission.
+        """
+        created_at = utcnow().isoformat()
+        with self.conn:
+            cur = self.conn.execute(
+                """INSERT OR IGNORE INTO signal_emissions
+                   (date, location, trigger, emission_key, text_json, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (_iso(day), location, trigger, emission_key, text_json, created_at),
+            )
+            inserted = bool(cur.rowcount)
+            if inserted:
+                self.conn.execute(
+                    """INSERT INTO notifications
+                       (date, location, trigger, text, created_at)
+                       VALUES (?, ?, ?, ?, ?)""",
+                    (_iso(day), location, trigger, text_json, created_at),
+                )
+        return inserted
+
+    def last_emission(
+        self, location: str, trigger: str | None = None
+    ) -> sqlite3.Row | None:
+        sql = "SELECT * FROM signal_emissions WHERE location=?"
         args: list[Any] = [location]
         if trigger is not None:
             sql += " AND trigger=?"

@@ -212,6 +212,28 @@ def test_notifications(store):
     assert store.last_notification("valmez", "rain")["text"] == "rain fell"
     assert store.last_notification("valmez", "nothing") is None
     assert store.last_notification("elsewhere") is None
+    assert store.last_emission("valmez")["text_json"] == "new"
+
+
+def test_v2_migration_copies_legacy_notifications(tmp_path):
+    path = tmp_path / "v1.sqlite"
+    with Store(path) as current:
+        current.add_notification(
+            date(2026, 9, 7),
+            "valmez",
+            "chmi_map",
+            '{"key":"level:4","text":"signal","data":{}}',
+        )
+    conn = sqlite3.connect(path)
+    conn.execute("DROP TABLE signal_emissions")
+    conn.execute("PRAGMA user_version=1")
+    conn.commit()
+    conn.close()
+
+    with Store(path) as migrated:
+        row = migrated.last_emission("valmez", "chmi_map")
+        assert row["emission_key"] == "level:4"
+        assert migrated.conn.execute("SELECT COUNT(*) FROM notifications").fetchone()[0] == 1
 
 
 def test_upsert_forecasts_ignores_observations(store):

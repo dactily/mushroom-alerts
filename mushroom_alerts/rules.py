@@ -85,6 +85,11 @@ from .views import location_snapshot
 
 __all__ = [
     "Signal",
+    "Evaluation",
+    "derive",
+    "evaluate",
+    "render",
+    "record_emissions",
     "decide",
     "snapshot",
     "describe",
@@ -150,6 +155,19 @@ class Signal:
     key: str
     data: dict[str, Any] = field(default_factory=dict)
     cooldown: int = REPEAT_AFTER_DAYS
+
+
+@dataclass(frozen=True, slots=True)
+class Evaluation:
+    """Pure decision result before text rendering and emission recording."""
+
+    today: date
+    threshold: float
+    snapshots: dict[str, dict[str, Any]]
+    candidates: dict[str, tuple[Signal, ...]]
+    fired: dict[str, tuple[Signal, ...]]
+    notes: tuple[str, ...]
+    failed_sources: tuple[str, ...]
 
 
 # ----------------------------------------------------------------------
@@ -594,7 +612,7 @@ def describe(store: Store, location: Location, today: date) -> str:
 # antispam / notification bookkeeping
 # ----------------------------------------------------------------------
 def _last_note(store: Store, slug: str, trigger: str) -> tuple[date, dict[str, Any]] | None:
-    row = store.last_notification(slug, trigger)
+    row = store.last_emission(slug, trigger)
     if row is None:
         return None
     try:
@@ -602,11 +620,11 @@ def _last_note(store: Store, slug: str, trigger: str) -> tuple[date, dict[str, A
     except (TypeError, ValueError):
         return None
     try:
-        payload = json.loads(row["text"])
+        payload = json.loads(row["text_json"])
         if not isinstance(payload, dict):
             raise ValueError
     except (TypeError, ValueError):
-        payload = {"key": row["text"], "text": row["text"], "data": {}}
+        payload = {"key": row["text_json"], "text": row["text_json"], "data": {}}
     return day, payload
 
 
@@ -637,16 +655,12 @@ def _record(store: Store, slug: str, signal: Signal, today: date) -> None:
     last = _last_note(store, slug, signal.trigger)
     if last is not None and last[0] == today and last[1].get("key") == signal.key:
         return  # already logged today -- do not duplicate the row
-    store.add_notification(
-        today,
-        slug,
-        signal.trigger,
-        json.dumps(
-            {"key": signal.key, "text": signal.text, "data": signal.data},
-            ensure_ascii=False,
-            sort_keys=True,
-        ),
+    payload = json.dumps(
+        {"key": signal.key, "text": signal.text, "data": signal.data},
+        ensure_ascii=False,
+        sort_keys=True,
     )
+    store.add_emission(today, slug, signal.trigger, signal.key, payload)
 
 
 # ----------------------------------------------------------------------
@@ -765,76 +779,149 @@ def _jsonable(value: Any) -> Any:
     return value
 
 
+def derive(
+    locations: list[Location],
+    results: list[FetchResult],
+    *,
+    store: Store,
+    today: date,
+) -> dict[str, list[tuple[date, float]]]:
+    """Persist derived API30 series and return one curve per location."""
+    threshold = api30_lib.threshold_mm()
+    forecast_result = next((r for r in results if r.source == OPENMETEO), None)
+    return {
+        location.slug: derive_api30(
+            store, location, forecast_result, today=today, threshold=threshold
+        )
+        for location in locations
+    }
+
+
+def evaluate(
+    locations: list[Location],
+    results: list[FetchResult],
+    *,
+    store: Store,
+    today: date,
+    curves: Mapping[str, Sequence[tuple[date, float]]],
+) -> Evaluation:
+    """Evaluate signals without mutating application state."""
+    threshold = api30_lib.threshold_mm()
+    notes = tuple(
+        UNAVAILABLE.get(result.source, f"{result.source} недоступен")
+        for result in results
+        if not result.ok
+    )
+    blackout = bool(results) and all(not result.ok for result in results)
+    snapshots: dict[str, dict[str, Any]] = {}
+    candidates_by_location: dict[str, tuple[Signal, ...]] = {}
+    fired_by_location: dict[str, tuple[Signal, ...]] = {}
+
+    for location in locations:
+        snap = snapshot(store, location, today, results)
+        candidates = tuple(
+            _signals_for(
+                location,
+                results,
+                snap,
+                curves.get(location.slug, ()),
+                store=store,
+                today=today,
+                threshold=threshold,
+            )
+        )
+        fired = (
+            ()
+            if blackout
+            else tuple(
+                signal
+                for signal in candidates
+                if _allowed(store, location.slug, signal, today)
+            )
+        )
+        snapshots[location.slug] = snap
+        candidates_by_location[location.slug] = candidates
+        fired_by_location[location.slug] = fired
+
+    return Evaluation(
+        today=today,
+        threshold=threshold,
+        snapshots=snapshots,
+        candidates=candidates_by_location,
+        fired=fired_by_location,
+        notes=notes,
+        failed_sources=tuple(result.source for result in results if not result.ok),
+    )
+
+
+def render(evaluation: Evaluation) -> Decision:
+    """Render an evaluation without store access or side effects."""
+    lines: list[str] = []
+    fired_lines: list[str] = []
+    data: dict[str, Any] = {
+        "date": evaluation.today.isoformat(),
+        "threshold_mm": evaluation.threshold,
+        "failed_sources": list(evaluation.failed_sources),
+        "locations": {},
+    }
+    for slug, snap in evaluation.snapshots.items():
+        candidates = evaluation.candidates[slug]
+        fired = evaluation.fired[slug]
+        lines.append(format_line(snap, notes=evaluation.notes))
+        if fired:
+            fired_lines.append(format_line(snap, fired, notes=evaluation.notes))
+
+        view = {key: value for key, value in snap.items() if key != "station"}
+        if snap.get("station"):
+            view["station"] = {
+                key: value
+                for key, value in snap["station"].items()
+                if key not in {"series", "series_points"}
+            }
+        data["locations"][slug] = {
+            "snapshot": _jsonable(view),
+            "signals": [
+                {
+                    "trigger": signal.trigger,
+                    "text": signal.text,
+                    "key": signal.key,
+                    "data": signal.data,
+                }
+                for signal in fired
+            ],
+            "suppressed": [signal.trigger for signal in candidates if signal not in fired],
+        }
+
+    if fired_lines:
+        return Decision(exit_code=EXIT_SIGNAL, text="\n".join(fired_lines), data=data)
+    return Decision(exit_code=EXIT_SILENT, text="\n".join(lines), data=data)
+
+
+def record_emissions(store: Store, evaluation: Evaluation) -> None:
+    """Record signals emitted by ``check``; this does not prove delivery."""
+    for slug, signals in evaluation.fired.items():
+        for signal in signals:
+            _record(store, slug, signal, evaluation.today)
+
+
 def decide(
     locations: list[Location],
     results: list[FetchResult],
     *,
     store: Store,
     today: date,
+    record: bool = True,
 ) -> Decision:
-    """PLAN §2/§3: exit ``10`` plus a message, or ``0`` and the plain snapshot.
+    """Compatibility facade over derive, evaluate, render, and emission.
 
     Readings of this run are already in the store when we get here (see
-    ``__main__.cmd_check``), which is what makes "yesterday" queryable.
+    ``__main__.cmd_check``).  ``brief`` calls with ``record=False``.
     """
-    threshold = api30_lib.threshold_mm()
-    forecast_result = next((r for r in results if r.source == OPENMETEO), None)
-    notes = [UNAVAILABLE.get(r.source, f"{r.source} недоступен") for r in results if not r.ok]
-    # Every source dead is exit 1 in the CLI, and the message would never be
-    # sent -- so do not burn the antispam slot on a signal nobody will read.
-    blackout = bool(results) and all(not r.ok for r in results)
-
-    lines: list[str] = []
-    fired_lines: list[str] = []
-    data: dict[str, Any] = {
-        "date": today.isoformat(),
-        "threshold_mm": threshold,
-        "failed_sources": [r.source for r in results if not r.ok],
-        "locations": {},
-    }
-
-    for location in locations:
-        curve = derive_api30(
-            store, location, forecast_result, today=today, threshold=threshold
-        )
-        snap = snapshot(store, location, today, results)
-        candidates = _signals_for(
-            location,
-            results,
-            snap,
-            curve,
-            store=store,
-            today=today,
-            threshold=threshold,
-        )
-        fired = (
-            []
-            if blackout
-            else [s for s in candidates if _allowed(store, location.slug, s, today)]
-        )
-        for signal in fired:
-            _record(store, location.slug, signal, today)
-
-        lines.append(format_line(snap, notes=notes))
-        if fired:
-            fired_lines.append(format_line(snap, fired, notes=notes))
-
-        view = {k: v for k, v in snap.items() if k != "station"}
-        if snap.get("station"):
-            view["station"] = {
-                k: v
-                for k, v in snap["station"].items()
-                if k not in {"series", "series_points"}
-            }
-        data["locations"][location.slug] = {
-            "snapshot": _jsonable(view),
-            "signals": [
-                {"trigger": s.trigger, "text": s.text, "key": s.key, "data": s.data}
-                for s in fired
-            ],
-            "suppressed": [s.trigger for s in candidates if s not in fired],
-        }
-
-    if fired_lines:
-        return Decision(exit_code=EXIT_SIGNAL, text="\n".join(fired_lines), data=data)
-    return Decision(exit_code=EXIT_SILENT, text="\n".join(lines), data=data)
+    curves = derive(locations, results, store=store, today=today)
+    evaluation = evaluate(
+        locations, results, store=store, today=today, curves=curves
+    )
+    decision = render(evaluation)
+    if record and decision.exit_code == EXIT_SIGNAL:
+        record_emissions(store, evaluation)
+    return decision

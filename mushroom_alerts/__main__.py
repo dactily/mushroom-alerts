@@ -439,7 +439,9 @@ def cmd_brief(args: argparse.Namespace) -> int:
             return EXIT_ERROR
         # The decision is what derives and stores the API30 curve and names
         # the triggers that fired; the brief only reports them.
-        decision = _decide(locations, run.results, store=store, today=today)
+        decision = _decide(
+            locations, run.results, store=store, today=today, record=False
+        )
         calculation_error = None
         if decision is None:
             calculation_error = "rules module is unavailable"
@@ -478,6 +480,7 @@ def _decide(
     *,
     store: Store,
     today: date,
+    record: bool = True,
 ) -> Decision | None:
     """Call ``rules.decide`` if the module exists.  ``None`` = not available."""
     package = __package__ or __name__.rsplit(".", 1)[0]
@@ -496,7 +499,10 @@ def _decide(
     if not callable(decide):
         return None
     try:
-        decision = decide(locations, results, store=store, today=today)
+        kwargs = {"store": store, "today": today}
+        if not record:
+            kwargs["record"] = False
+        decision = decide(locations, results, **kwargs)
     except Exception:  # noqa: BLE001 - a broken rules module is an error
         traceback.print_exc(file=sys.stderr)
         message = "rules.decide() failed"

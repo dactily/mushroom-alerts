@@ -1,0 +1,26 @@
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parent.parent
+
+
+def test_daily_prompt_updates_its_notepad_even_when_silent():
+    prompt = (ROOT / "hermes" / "daily_prompt.txt").read_text(encoding="utf-8")
+    assert "cron notepad mushroom-daily set mushroom_state" in prompt
+    assert "даже если ответ будет `[SILENT]`" in prompt
+    assert '"error_class"' in prompt and '"rules_version"' in prompt
+    assert "mushroom-weekend set" not in prompt
+
+
+def test_weekend_prompt_uses_an_independent_notepad():
+    prompt = (ROOT / "hermes" / "friday_prompt.txt").read_text(encoding="utf-8")
+    assert "cron notepad mushroom-weekend set mushroom_state" in prompt
+    assert "Не читай и не изменяй notepad ежедневного задания" in prompt
+    assert "mushroom-daily set" not in prompt
+
+
+def test_hermes_contract_does_not_claim_exactly_once_delivery():
+    docs = (ROOT / "hermes" / "PROMPT.md").read_text(encoding="utf-8")
+    assert "delivery_outcome" in docs
+    assert "Exactly-once не гарантируется" in docs
+    assert "не синхронизирует его обратно в SQLite" in docs

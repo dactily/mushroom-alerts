@@ -425,6 +425,21 @@ def test_decide_fires_and_names_only_the_triggered_location(store):
     assert decision.exit_code == 10
     assert "Valašské Meziříčí" in decision.text
     assert "Valašská Bystřice" not in decision.text
+
+
+def test_evaluate_and_render_do_not_record_emissions(store):
+    results = [result("chmi_map", [r("chmi_map", "level", 4.0)])]
+    for item in results:
+        store.upsert_readings(item.readings, retrieved_at=item.fetched_at)
+    curves = rules.derive([VALMEZ], results, store=store, today=TODAY)
+    evaluation = rules.evaluate(
+        [VALMEZ], results, store=store, today=TODAY, curves=curves
+    )
+    decision = rules.render(evaluation)
+    assert decision.exit_code == 10
+    assert store.conn.execute("SELECT COUNT(*) FROM signal_emissions").fetchone()[0] == 0
+    rules.record_emissions(store, evaluation)
+    assert store.conn.execute("SELECT COUNT(*) FROM signal_emissions").fetchone()[0] == 1
     assert decision.data["locations"]["valmez"]["signals"][0]["trigger"] == "chmi_map"
 
 

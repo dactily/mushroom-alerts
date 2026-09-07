@@ -293,6 +293,8 @@ def test_cli_brief_exits_0_and_prints_the_brief(monkeypatch, capsys):
     # the deterministic triggers of rules.decide are reported, not re-derived
     assert "сработавшие триггеры (детерминированные, из rules.decide):" in out
     assert "chmi_map" in out  # ČHMÚ 4/5 fired for valmez
+    with Store() as store:
+        assert store.conn.execute("SELECT COUNT(*) FROM signal_emissions").fetchone()[0] == 0
 
 
 def test_cli_brief_survives_a_dead_source(monkeypatch, capsys):
