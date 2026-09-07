@@ -9,10 +9,10 @@
 Файлы в этой папке: `mushroom_brief.sh` (обёртка), `daily_prompt.txt` (08:30, ежедневно, с continuity), `friday_prompt.txt` (19:00 пятница, всегда). Установка:
 
 ```bash
-cp hermes/mushroom_brief.sh ~/.hermes/scripts/ && chmod 700 ~/.hermes/scripts/mushroom_brief.sh
+cp hermes/mushroom_brief.sh ~/.hermes/profiles/family/scripts/ && chmod 700 ~/.hermes/profiles/family/scripts/mushroom_brief.sh
 HERMES=~/.hermes/hermes-agent/venv/bin/hermes
-$HERMES cron create "30 8 * * *" "$(cat hermes/daily_prompt.txt)" --name mushroom-daily --script mushroom_brief.sh --continuity --deliver telegram:<chat_id>
-$HERMES cron create "0 19 * * 5" "$(cat hermes/friday_prompt.txt)" --name mushroom-weekend --script mushroom_brief.sh --deliver telegram:<chat_id>
+$HERMES --profile family cron create "30 8 * * *" "$(cat hermes/daily_prompt.txt)" --name mushroom-daily --script mushroom_brief.sh --continuity --deliver telegram:<family_chat_id>,telegram:<my_chat_id>
+$HERMES --profile family cron create "0 19 * * 5" "$(cat hermes/friday_prompt.txt)" --name mushroom-weekend --script mushroom_brief.sh --deliver telegram:<family_chat_id>,telegram:<my_chat_id>
 ```
 
 Ниже — исходный текст правил, из которого сделаны оба промпта (справочно).
