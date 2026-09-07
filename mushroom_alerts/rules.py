@@ -101,11 +101,11 @@ API30_FORECAST = api30_lib.FORECAST_SOURCE
 
 #: How a dead source is named in the report, already in the right gender.
 UNAVAILABLE = {
-    CHMI_MAP: "ČHMÚ mapa nedostupná",
-    HOUBYMAPA: "HoubyMapa nedostupná",
-    STATION: "stanice nedostupná",
-    OPENMETEO: "Open-Meteo nedostupné",
-    API30_FORECAST: "API30 nedostupné",
+    CHMI_MAP: "карта ČHMÚ недоступна",
+    HOUBYMAPA: "HoubyMapa недоступна",
+    STATION: "станция недоступна",
+    OPENMETEO: "Open-Meteo недоступен",
+    API30_FORECAST: "API30 недоступен",
 }
 
 # -- trigger ids (also the ``trigger`` column of ``notifications``) ------
@@ -266,8 +266,8 @@ def rain_signal(
     return Signal(
         trigger=T_RAIN_FORECAST,
         text=(
-            f"déšť {_mm(total)} za {len(window)} dny (nejvíc {_d(anchor)}), "
-            f"T {_c(mean)} → okno {_d(start)}–{_d(end)}"
+            f"дождь {_mm(total)} за {len(window)} дня (максимум {_d(anchor)}), "
+            f"T {_c(mean)} → окно {_d(start)}–{_d(end)}"
         ),
         # The identity of the news is the rain episode, not its exact sum:
         # tomorrow the same rain still dominates a shifted 3-day window.
@@ -310,13 +310,13 @@ def rain_window_signal(
     anchor = ""
     if episode.get("anchor"):
         try:
-            anchor = f" po dešti {_d(date.fromisoformat(str(episode['anchor'])))}"
+            anchor = f" после дождя {_d(date.fromisoformat(str(episode['anchor'])))}"
         except ValueError:
             anchor = ""
     return Signal(
         trigger=T_RAIN_WINDOW,
         text=(
-            f"okno růstu{anchor} začalo ({_d(start)}–{_d(end)}), "
+            f"окно роста{anchor} началось ({_d(start)}–{_d(end)}), "
             f"API30 {_mm(api30_now)} ≥ {_mm(threshold)}"
         ),
         key=start.isoformat(),
@@ -360,14 +360,14 @@ def api30_signal(
         return None
     peak_day, peak_value = max(curve, key=lambda pair: (pair[1], pair[0]))
     horizon = (day - today).days
-    text = f"prognóza: API30 ≥ {_mm(threshold)} od {_d(day)}"
-    text += f" (vrchol {_mm(peak_value)} {_d(peak_day)}"
+    text = f"прогноз: API30 ≥ {_mm(threshold)} с {_d(day)}"
+    text += f" (пик {_mm(peak_value)} {_d(peak_day)}"
     wettest = _wettest(rain or {}, today, day)
     if wettest is not None:
-        text += f", déšť {_mm(wettest[1])} {_d(wettest[0])}"
+        text += f", дождь {_mm(wettest[1])} {_d(wettest[0])}"
     text += ")"
     if horizon > VAGUE_AFTER_DAYS:
-        text += " — orientačně"
+        text += " — ориентировочно"
     return Signal(
         trigger=T_API30_CROSS,
         text=text,
@@ -585,7 +585,7 @@ def _facts(snap: Mapping[str, Any]) -> list[str]:
         if station["t_mean"] is not None:
             bits.append(f"T {_c(station['t_mean'])}")
         if bits:
-            parts.append("stanice " + ", ".join(bits))
+            parts.append("станция " + ", ".join(bits))
     return parts
 
 
@@ -595,20 +595,20 @@ def _forecast_segment(snap: Mapping[str, Any]) -> str | None:
         return None
     bits = []
     if fc["today_mm"] is not None:
-        bits.append(f"API30 dnes {_mm(fc['today_mm'])}")
+        bits.append(f"API30 сегодня {_mm(fc['today_mm'])}")
     peak_day, peak_value = fc["peak"]
     bits.append(f"max {_mm(peak_value)} {_d(peak_day)}")
     if fc["next_rain"] is not None:
         day, value = fc["next_rain"]
-        bits.append(f"déšť {_mm(value)} {_d(day)}")
+        bits.append(f"дождь {_mm(value)} {_d(day)}")
     threshold = fc["threshold_mm"]
     if fc["cross"] is not None:
-        bits.append(f"práh {_mm(threshold)} překročen {_d(fc['cross'])}")
+        bits.append(f"порог {_mm(threshold)} пройден {_d(fc['cross'])}")
     elif fc["today_mm"] is not None and fc["today_mm"] >= threshold:
-        bits.append(f"práh {_mm(threshold)} překročen už dnes")
+        bits.append(f"порог {_mm(threshold)} пройден уже сегодня")
     else:
-        bits.append(f"práh {_mm(threshold)} —")
-    return "prognóza: " + ", ".join(bits)
+        bits.append(f"порог {_mm(threshold)} —")
+    return "прогноз: " + ", ".join(bits)
 
 
 def format_line(
@@ -828,7 +828,7 @@ def decide(
     """
     threshold = api30_lib.threshold_mm()
     forecast_result = next((r for r in results if r.source == OPENMETEO), None)
-    notes = [UNAVAILABLE.get(r.source, f"{r.source} nedostupné") for r in results if not r.ok]
+    notes = [UNAVAILABLE.get(r.source, f"{r.source} недоступен") for r in results if not r.ok]
     # Every source dead is exit 1 in the CLI, and the message would never be
     # sent -- so do not burn the antispam slot on a signal nobody will read.
     blackout = bool(results) and all(not r.ok for r in results)

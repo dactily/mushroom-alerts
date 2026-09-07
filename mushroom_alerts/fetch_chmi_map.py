@@ -78,11 +78,11 @@ PALETTE: dict[tuple[int, int, int], int] = {
 }
 
 LEVEL_LABELS = {
-    1: "velmi nízká",
-    2: "nízká",
-    3: "střední",
-    4: "vysoká",
-    5: "velmi vysoká",
+    1: "очень низкая",
+    2: "низкая",
+    3: "средняя",
+    4: "высокая",
+    5: "очень высокая",
 }
 
 #: Side of the square sampling window, in pixels (5x5 majority vote).

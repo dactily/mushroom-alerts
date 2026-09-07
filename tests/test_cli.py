@@ -334,8 +334,8 @@ def test_check_collapses_multi_day_sources(monkeypatch, capsys):
     assert "api30_mm 20 mm" in line and "rh 81 %" in line
     assert line.count("sra_mm") == 1 and line.count("t_mean") == 1
     # ... and a summary, not a dump, for the two curves
-    assert "nejbližší ≥5 mm 10 mm" in line
-    assert "API30 dnes 19 mm, max 31 mm" in line and "práh 25 mm" in line
+    assert "ближайший ≥5 mm 10 mm" in line
+    assert "API30 сегодня 19 mm, max 31 mm" in line and "порог 25 mm" in line
 
 
 def test_status_renders_the_rules_line(monkeypatch, capsys):
@@ -356,7 +356,7 @@ def test_status_renders_the_rules_line(monkeypatch, capsys):
     capsys.readouterr()
     assert cli.main(["status"]) == 0
     out = capsys.readouterr().out
-    assert "ČHMÚ 3/5" in out and "stanice API30 20 mm" in out and "SRA 3d 20 mm" in out
+    assert "ČHMÚ 3/5" in out and "станция API30 20 mm" in out and "SRA 3d 20 mm" in out
 
 
 def test_status_weekly_does_not_crash(capsys):

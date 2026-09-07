@@ -66,7 +66,7 @@ FETCH_ORDER = (
 SOURCE_LABELS = {
     "chmi_map": "ČHMÚ",
     "houbymapa": "HoubyMapa",
-    "chmi_station": "stanice",
+    "chmi_station": "станция",
     "openmeteo": "Open-Meteo",
     "api30_forecast": "API30",
 }
@@ -216,25 +216,25 @@ def _forecast_segment(source: str, readings: list[Reading], today: date) -> str:
         peak_day, peak = max(curve, key=lambda pair: (pair[1], pair[0]))
         bits = []
         if now is not None:
-            bits.append(f"dnes {now:.0f} mm")
+            bits.append(f"сегодня {now:.0f} mm")
         bits.append(f"max {peak:.0f} mm {peak_day.day}.{peak_day.month}.")
         cross = api30_lib.crossing(curve, threshold, today=today)
         if cross is not None:
-            bits.append(f"práh {threshold:.0f} mm {cross.day}.{cross.month}.")
+            bits.append(f"порог {threshold:.0f} mm {cross.day}.{cross.month}.")
         elif now is not None and now >= threshold:
-            bits.append(f"práh {threshold:.0f} mm už dnes")
+            bits.append(f"порог {threshold:.0f} mm уже сегодня")
         else:
-            bits.append(f"práh {threshold:.0f} mm —")
+            bits.append(f"порог {threshold:.0f} mm —")
         return f"{label} " + ", ".join(bits)
 
     rain = sorted((r.date, float(r.value)) for r in readings if r.metric == "precip_mm")
     nxt = next(((d, v) for d, v in rain if d > today and v >= 5.0), None)
     total = sum(v for d, v in rain if d > today)
-    bits = [f"déšť +{total:.0f} mm/16 d"] if rain else []
+    bits = [f"дождь +{total:.0f} mm/16 дн"] if rain else []
     if nxt is not None:
-        bits.append(f"nejbližší ≥5 mm {nxt[1]:.0f} mm {nxt[0].day}.{nxt[0].month}.")
+        bits.append(f"ближайший ≥5 mm {nxt[1]:.0f} mm {nxt[0].day}.{nxt[0].month}.")
     elif rain:
-        bits.append("nejbližší ≥5 mm —")
+        bits.append("ближайший ≥5 mm —")
     return f"{label} " + ", ".join(bits) if bits else f"{label} —"
 
 

@@ -143,7 +143,7 @@ def test_fetch_live_fixture(http, locations):
     assert r.source == "chmi_map" and r.metric == "level"
     assert r.text == "ne 6. 9." and r.date == date(2026, 9, 6)
     assert r.meta["px"] == [2308, 967]
-    assert r.meta["label"] == "střední"
+    assert r.meta["label"] == "средняя"
     assert "stale" not in r.meta
 
 

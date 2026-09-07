@@ -83,7 +83,7 @@ def openmeteo_result(slug="valmez", *, rain=(), t_mean=15.0, t_min=8.0, days=16)
 def test_chmi_fires_on_level_4():
     signal = rules.chmi_map_signal(r("chmi_map", "level", 4.0), None)
     assert signal is not None and signal.trigger == "chmi_map"
-    assert "ČHMÚ 4/5" in signal.text and "vysoká" in signal.text
+    assert "ČHMÚ 4/5" in signal.text and "высокая" in signal.text
 
 
 def test_chmi_fires_on_a_one_step_rise():
@@ -127,7 +127,7 @@ def test_chmi_silent_without_a_reading():
 # ----------------------------------------------------------------------
 def test_houbymapa_fires_on_level_4():
     signal = rules.houbymapa_signal(4.0, 0.55, 3.0, 0.47)
-    assert signal is not None and "4/5" in signal.text and "vysoká" in signal.text
+    assert signal is not None and "4/5" in signal.text and "высокая" in signal.text
 
 
 def test_houbymapa_fires_on_score_alone():
@@ -167,7 +167,7 @@ def test_rain_fires_on_20_mm_at_the_right_temperature():
         (anchor + timedelta(days=7)).isoformat(),
         (anchor + timedelta(days=12)).isoformat(),
     ]
-    assert "okno" in signal.text and "22 mm" in signal.text
+    assert "окно" in signal.text and "22 mm" in signal.text
 
 
 def test_rain_silent_below_the_sum():
@@ -205,7 +205,7 @@ def test_rain_window_fires_inside_the_window_when_the_ground_stayed_wet():
     }
     signal = rules.rain_window_signal(episode, 27.0, 25.0, TODAY)
     assert signal is not None and signal.trigger == "rain_window"
-    assert "okno růstu" in signal.text
+    assert "окно роста" in signal.text
 
 
 def test_rain_window_silent_when_dry_or_out_of_range():
@@ -242,21 +242,21 @@ def test_api30_fires_on_a_crossing_that_passes_the_temperature_gate():
     signal = rules.api30_signal(curve, _temps(), 25.0, TODAY)
     assert signal is not None and signal.trigger == "api30_cross"
     assert signal.data["cross"] == (TODAY + timedelta(days=3)).isoformat()
-    assert "API30 ≥ 25 mm od" in signal.text and "vrchol 30 mm" in signal.text
-    assert "orientačně" not in signal.text  # 3 days ahead is not vague
+    assert "API30 ≥ 25 mm с" in signal.text and "пик 30 mm" in signal.text
+    assert "ориентировочно" not in signal.text  # 3 days ahead is not vague
 
 
 def test_api30_names_the_rain_that_caused_it():
     curve = _curve([10, 12, 20, 26])
     rain = {TODAY + timedelta(days=2): 18.0, TODAY + timedelta(days=1): 1.0}
     signal = rules.api30_signal(curve, _temps(), 25.0, TODAY, rain=rain)
-    assert "déšť 18 mm" in signal.text
+    assert "дождь 18 mm" in signal.text
 
 
 def test_api30_marks_a_distant_crossing_as_vague():
     curve = _curve([10] * 9 + [30])
     signal = rules.api30_signal(curve, _temps(days=12), 25.0, TODAY)
-    assert signal is not None and "orientačně" in signal.text
+    assert signal is not None and "ориентировочно" in signal.text
     assert signal.data["vague"] is True
 
 
@@ -351,7 +351,7 @@ def test_decide_notes_a_dead_source(store):
     ]
     decision = _run(store, results)
     assert decision.exit_code == 10
-    assert "(HoubyMapa nedostupná)" in decision.text
+    assert "(HoubyMapa недоступна)" in decision.text
 
 
 def test_decide_uses_yesterdays_stored_state_for_houbymapa(store):
@@ -498,14 +498,14 @@ def test_rain_trigger_end_to_end_then_the_window(store):
     station_history(store, rain=wet)
     decision = _decide(store, [result("chmi_station", [])])
     assert decision.exit_code == 10
-    assert "déšť" in decision.text and "okno" in decision.text
+    assert "дождь" in decision.text and "окно" in decision.text
 
     # ... and 8 days later, with the ground still wet, the window opens
     later = TODAY + timedelta(days=8)
     station_history(store, rain=wet, end=later)
     decision = _decide(store, [result("chmi_station", [])], today=later)
     assert decision.exit_code == 10
-    assert "okno růstu" in decision.text
+    assert "окно роста" in decision.text
 
 
 def test_rain_window_needs_the_api30_to_hold(store):
@@ -538,8 +538,8 @@ def test_describe_is_one_compact_line(store):
     line = rules.describe(store, VALMEZ, TODAY)
     assert line.count("\n") == 0
     assert line.startswith("🍄 Valašské Meziříčí:")
-    for fragment in ("ČHMÚ 3/5", "HoubyMapa 3/5 (0.47)", "stanice API30 20 mm",
-                     "SRA 3d 12 mm", "T 15.0 °C", "prognóza:", "práh 25 mm"):
+    for fragment in ("ČHMÚ 3/5", "HoubyMapa 3/5 (0.47)", "станция API30 20 mm",
+                     "SRA 3d 12 mm", "T 15.0 °C", "прогноз:", "порог 25 mm"):
         assert fragment in line, line
 
 
