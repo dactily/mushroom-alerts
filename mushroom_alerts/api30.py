@@ -82,6 +82,7 @@ __all__ = [
     "PLAN_LAG_OFFSET",
     "FORECAST_SOURCE",
     "METRIC",
+    "CALCULATION_VERSION",
     "T_MEAN_MIN",
     "T_MEAN_MAX",
     "T_MIN_ABOVE",
@@ -139,6 +140,7 @@ PLAN_LAG_OFFSET = 1
 #: ``Reading.source`` / ``Reading.metric`` used by :func:`to_readings`.
 FORECAST_SOURCE = "api30_forecast"
 METRIC = "api30_mm"
+CALCULATION_VERSION = "api30-v1"
 
 #: Temperature gate of PLAN §3 trigger 4.
 T_MEAN_MIN = 8.0
@@ -416,6 +418,7 @@ def to_readings(
             "threshold_mm": threshold,
             "decay": DECAY,
             "window": WINDOW,
+            "calculation_version": CALCULATION_VERSION,
         }
         if detail is not None:
             meta.update(

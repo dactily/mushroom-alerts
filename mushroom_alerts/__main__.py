@@ -337,7 +337,7 @@ def run_pipeline(
     if not results:
         return None
     for result in results:
-        store.upsert_readings(result.readings)
+        store.upsert_readings(result.readings, retrieved_at=result.fetched_at)
     cache_params(store, results)
     return Pipeline(
         results=results,

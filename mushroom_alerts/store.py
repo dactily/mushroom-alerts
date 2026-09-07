@@ -26,15 +26,17 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import uuid
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
 from .base import Location, Reading, utcnow
 
-__all__ = ["Store", "db_path", "DEFAULT_DB"]
+__all__ = ["Store", "db_path", "DEFAULT_DB", "SCHEMA_VERSION"]
 
 DEFAULT_DB = "state.sqlite"
+SCHEMA_VERSION = 1
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS readings (
@@ -87,6 +89,36 @@ CREATE INDEX IF NOT EXISTS forecasts_lookup
     ON forecasts (location, source, metric, target_date);
 """
 
+MIGRATION_1 = """
+CREATE TABLE IF NOT EXISTS forecast_runs (
+    run_id                  TEXT PRIMARY KEY,
+    source                  TEXT NOT NULL,
+    retrieved_at            TEXT NOT NULL,
+    upstream_issued_at      TEXT,
+    model                   TEXT,
+    calculation_version     TEXT,
+    status                  TEXT NOT NULL DEFAULT 'ok',
+    input_run_ids_json      TEXT NOT NULL DEFAULT '[]',
+    meta_json               TEXT,
+    created_at              TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS forecast_runs_lookup
+    ON forecast_runs (source, retrieved_at);
+
+CREATE TABLE IF NOT EXISTS forecast_points (
+    run_id       TEXT NOT NULL REFERENCES forecast_runs(run_id),
+    source       TEXT NOT NULL,
+    location     TEXT NOT NULL,
+    target_date  TEXT NOT NULL,
+    metric       TEXT NOT NULL,
+    value        REAL NOT NULL,
+    meta_json    TEXT,
+    PRIMARY KEY (run_id, location, target_date, metric)
+);
+CREATE INDEX IF NOT EXISTS forecast_points_lookup
+    ON forecast_points (location, source, metric, target_date, run_id);
+"""
+
 
 def db_path() -> Path:
     """Where the SQLite file lives (``$MUSHROOM_DB`` or ``./state.sqlite``)."""
@@ -111,6 +143,7 @@ class Store:
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA foreign_keys=ON")
         self.conn.executescript(SCHEMA)
+        self._migrate()
         self.conn.commit()
 
     def __enter__(self) -> "Store":
@@ -125,7 +158,50 @@ class Store:
     # ------------------------------------------------------------------
     # readings
     # ------------------------------------------------------------------
-    def upsert_readings(self, readings: Iterable[Reading]) -> int:
+    def _migrate(self) -> None:
+        version = int(self.conn.execute("PRAGMA user_version").fetchone()[0])
+        if version > SCHEMA_VERSION:
+            raise RuntimeError(
+                f"database schema {version} is newer than supported {SCHEMA_VERSION}"
+            )
+        if version < 1:
+            self.conn.executescript(MIGRATION_1)
+            self._backfill_legacy_forecasts()
+            self.conn.execute("PRAGMA user_version=1")
+
+    def _backfill_legacy_forecasts(self) -> None:
+        groups = self.conn.execute(
+            "SELECT DISTINCT source, issued FROM forecasts ORDER BY source, issued"
+        ).fetchall()
+        created_at = utcnow().isoformat()
+        for group in groups:
+            source, issued = str(group["source"]), str(group["issued"])
+            run_id = f"legacy:{source}:{issued}"
+            retrieved_at = f"{issued}T00:00:00+00:00"
+            self.conn.execute(
+                """INSERT OR IGNORE INTO forecast_runs
+                   (run_id, source, retrieved_at, calculation_version, status,
+                    input_run_ids_json, meta_json, created_at)
+                   VALUES (?, ?, ?, 'legacy', 'ok', '[]', '{\"legacy\": true}', ?)""",
+                (run_id, source, retrieved_at, created_at),
+            )
+            self.conn.execute(
+                """INSERT OR IGNORE INTO forecast_points
+                   (run_id, source, location, target_date, metric, value, meta_json)
+                   SELECT ?, source, location, target_date, metric, value,
+                          '{\"legacy\": true}'
+                   FROM forecasts WHERE source=? AND issued=?""",
+                (run_id, source, issued),
+            )
+
+    def upsert_readings(
+        self,
+        readings: Iterable[Reading],
+        *,
+        retrieved_at: datetime | None = None,
+        calculation_version: str | None = None,
+        input_run_ids: Sequence[str] = (),
+    ) -> int:
         """Insert or replace readings in place.  Returns the row count.
 
         Idempotent: the same reading written twice updates one row.  Forecast
@@ -134,6 +210,12 @@ class Store:
         rows = list(readings)
         if not rows:
             return 0
+        self._archive_forecast_groups(
+            rows,
+            retrieved_at=retrieved_at,
+            calculation_version=calculation_version,
+            input_run_ids=input_run_ids,
+        )
         now = utcnow().isoformat()
         with self.conn:
             self.conn.executemany(
@@ -166,6 +248,73 @@ class Store:
         if forecasts:
             self.upsert_forecasts(forecasts)
         return len(rows)
+
+    def _archive_forecast_groups(
+        self,
+        rows: Sequence[Reading],
+        *,
+        retrieved_at: datetime | None,
+        calculation_version: str | None,
+        input_run_ids: Sequence[str],
+    ) -> None:
+        """Archive complete model/derived runs, including their current day."""
+        grouped: dict[str, list[Reading]] = {}
+        for reading in rows:
+            if reading.source in {"openmeteo", "api30_forecast"} or reading.is_forecast:
+                grouped.setdefault(reading.source, []).append(reading)
+        if not grouped:
+            return
+        stamp = (retrieved_at or utcnow()).isoformat()
+        for source, points in grouped.items():
+            run_id = str(uuid.uuid4())
+            first_meta = next((r.meta for r in points if r.meta), {}) or {}
+            upstream_issued_at = first_meta.get("upstream_issued_at")
+            model = first_meta.get("model")
+            version = calculation_version or first_meta.get("calculation_version")
+            run_meta = {
+                "locations": sorted({r.location for r in points}),
+                "point_count": len(points),
+            }
+            with self.conn:
+                self.conn.execute(
+                    """INSERT INTO forecast_runs
+                       (run_id, source, retrieved_at, upstream_issued_at, model,
+                        calculation_version, status, input_run_ids_json,
+                        meta_json, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?, 'ok', ?, ?, ?)""",
+                    (
+                        run_id,
+                        source,
+                        stamp,
+                        upstream_issued_at,
+                        model,
+                        version,
+                        json.dumps(sorted(set(input_run_ids))),
+                        json.dumps(run_meta, ensure_ascii=False, sort_keys=True),
+                        utcnow().isoformat(),
+                    ),
+                )
+                for reading in points:
+                    meta = dict(reading.meta or {})
+                    meta["run_id"] = run_id
+                    meta["retrieved_at"] = stamp
+                    if version:
+                        meta["calculation_version"] = version
+                    reading.meta = meta
+                    self.conn.execute(
+                        """INSERT INTO forecast_points
+                           (run_id, source, location, target_date, metric, value, meta_json)
+                           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                        (
+                            run_id,
+                            source,
+                            reading.location,
+                            _iso(reading.date),
+                            reading.metric,
+                            float(reading.value),
+                            reading.meta_json(),
+                        ),
+                    )
 
     def get_reading(
         self, source: str, location: str, metric: str, day: date | str
@@ -386,6 +535,37 @@ class Store:
                 (source, location, metric, _iso(issued)),
             )
         )
+
+    def latest_forecast_run(
+        self, source: str, location: str, metric: str | None = None
+    ) -> sqlite3.Row | None:
+        sql = """SELECT DISTINCT fr.* FROM forecast_runs fr
+                 JOIN forecast_points fp ON fp.run_id=fr.run_id
+                 WHERE fr.source=? AND fp.location=?"""
+        args: list[Any] = [source, location]
+        if metric is not None:
+            sql += " AND fp.metric=?"
+            args.append(metric)
+        sql += " ORDER BY fr.retrieved_at DESC, fr.created_at DESC LIMIT 1"
+        return self.conn.execute(sql, args).fetchone()
+
+    def forecast_run_points(
+        self,
+        run_id: str,
+        *,
+        location: str | None = None,
+        metric: str | None = None,
+    ) -> list[sqlite3.Row]:
+        sql = "SELECT * FROM forecast_points WHERE run_id=?"
+        args: list[Any] = [run_id]
+        if location is not None:
+            sql += " AND location=?"
+            args.append(location)
+        if metric is not None:
+            sql += " AND metric=?"
+            args.append(metric)
+        sql += " ORDER BY target_date, metric"
+        return list(self.conn.execute(sql, args))
 
 
 def _to_reading(row: sqlite3.Row | None) -> Reading | None:

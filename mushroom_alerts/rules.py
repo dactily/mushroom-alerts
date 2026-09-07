@@ -443,8 +443,17 @@ def derive_api30(
         return []
     details = api30_lib.forecast_api30_details(observed, forecast, today=today)
     if details:
+        input_run_ids = sorted(
+            {
+                str((reading.meta or {}).get("run_id"))
+                for reading in forecast_result.readings
+                if (reading.meta or {}).get("run_id")
+            }
+        )
         store.upsert_readings(
-            api30_lib.to_readings(details, location.slug, today=today, threshold=threshold)
+            api30_lib.to_readings(details, location.slug, today=today, threshold=threshold),
+            calculation_version=api30_lib.CALCULATION_VERSION,
+            input_run_ids=input_run_ids,
         )
     return [(detail.date, detail.value) for detail in details]
 

@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from datetime import date
+import sqlite3
+from datetime import date, datetime, timezone
 
 import pytest
 
 from mushroom_alerts.base import Location, Reading
-from mushroom_alerts.store import Store, db_path
+from mushroom_alerts.store import SCHEMA_VERSION, Store, db_path
 
 
 @pytest.fixture
@@ -68,6 +69,72 @@ def test_forecasts_are_mirrored(store):
     rows = store.forecast_series("chmi_map", "valmez", "level", "2026-09-07")
     assert len(rows) == 1 and rows[0]["value"] == 6.0
     assert rows[0]["target_date"] == "2026-09-10"
+
+
+def test_forecast_runs_keep_two_runs_from_the_same_day(store):
+    first = Reading(
+        "openmeteo",
+        "valmez",
+        date(2026, 9, 7),
+        "precip_mm",
+        1.0,
+        meta={"provisional": True, "model": "best_match"},
+    )
+    second = Reading(
+        "openmeteo",
+        "valmez",
+        date(2026, 9, 7),
+        "precip_mm",
+        2.0,
+        meta={"provisional": True, "model": "best_match"},
+    )
+    store.upsert_readings(
+        [first], retrieved_at=datetime(2026, 9, 7, 6, tzinfo=timezone.utc)
+    )
+    store.upsert_readings(
+        [second], retrieved_at=datetime(2026, 9, 7, 17, tzinfo=timezone.utc)
+    )
+    runs = store.conn.execute(
+        "SELECT * FROM forecast_runs WHERE source='openmeteo' ORDER BY retrieved_at"
+    ).fetchall()
+    assert len(runs) == 2
+    assert runs[0]["run_id"] != runs[1]["run_id"]
+    first_points = store.forecast_run_points(runs[0]["run_id"], location="valmez")
+    second_points = store.forecast_run_points(runs[1]["run_id"], location="valmez")
+    assert first_points[0]["value"] == 1.0
+    assert second_points[0]["value"] == 2.0
+    assert store.latest_forecast_run("openmeteo", "valmez")["run_id"] == runs[1]["run_id"]
+
+
+def test_migration_backfills_legacy_forecasts(tmp_path):
+    path = tmp_path / "legacy.sqlite"
+    conn = sqlite3.connect(path)
+    conn.executescript(
+        """
+        CREATE TABLE forecasts (
+            id INTEGER PRIMARY KEY,
+            issued TEXT NOT NULL,
+            source TEXT NOT NULL,
+            location TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            metric TEXT NOT NULL,
+            value REAL NOT NULL,
+            UNIQUE (issued, source, location, target_date, metric)
+        );
+        INSERT INTO forecasts
+            (issued, source, location, target_date, metric, value)
+        VALUES ('2026-09-07', 'openmeteo', 'valmez', '2026-09-08', 'precip_mm', 4.2);
+        """
+    )
+    conn.close()
+
+    with Store(path) as migrated:
+        assert migrated.conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+        run = migrated.latest_forecast_run("openmeteo", "valmez", "precip_mm")
+        assert run is not None
+        assert run["run_id"] == "legacy:openmeteo:2026-09-07"
+        points = migrated.forecast_run_points(run["run_id"], location="valmez")
+        assert len(points) == 1 and points[0]["value"] == 4.2
 
 
 def test_latest_and_before(store):
