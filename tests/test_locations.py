@@ -13,10 +13,14 @@ SHIPPED_SLUGS = [
     "valasska-bystrice",
     "maruska",
     "benesky",
-    "kudlacena",
     "kohutka",
     "lidecko-lacnov",
     "bumbalka",
+    "meduvka",
+    "semetinske-lesy",
+    "rajnochovicke-lesy",
+    "kamenarka",
+    "pod-vartovnou",
 ]
 SHIPPED_SHORTS = [
     "Valmez",
@@ -24,10 +28,14 @@ SHIPPED_SHORTS = [
     "Bystřice",
     "Maruška",
     "Benešky",
-    "Kudlačena",
     "Kohútka",
     "Lidečko",
     "Bumbálka",
+    "Medůvka",
+    "Semetín",
+    "Rajnochovice",
+    "Kamenárka",
+    "Vartovna",
 ]
 
 

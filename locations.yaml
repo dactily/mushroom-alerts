@@ -27,11 +27,6 @@
   short: Benešky
   lat: 49.397036
   lon: 18.294392
-- name: Horní Bečva – Kudlačena
-  slug: kudlacena
-  short: Kudlačena
-  lat: 49.431801
-  lon: 18.325566
 - name: Nový Hrozenkov – Kohútka
   slug: kohutka
   short: Kohútka
@@ -47,3 +42,28 @@
   short: Bumbálka
   lat: 49.399167
   lon: 18.410556
+- name: Bystřička – Medůvka
+  slug: meduvka
+  short: Medůvka
+  lat: 49.427366
+  lon: 17.991921
+- name: Vsetín – Semetínské lesy
+  slug: semetinske-lesy
+  short: Semetín
+  lat: 49.360098
+  lon: 17.95179
+- name: Rajnochovice – Fons Theodori
+  slug: rajnochovicke-lesy
+  short: Rajnochovice
+  lat: 49.379299
+  lon: 17.787399
+- name: Veřovické vrchy – Kamenárka
+  slug: kamenarka
+  short: Kamenárka
+  lat: 49.509247
+  lon: 18.135769
+- name: Liptál – lesy pod Vartovnou
+  slug: pod-vartovnou
+  short: Vartovna
+  lat: 49.270818
+  lon: 17.925563

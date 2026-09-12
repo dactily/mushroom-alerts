@@ -447,7 +447,8 @@ def test_cli_brief_mode_daily_prints_the_block_and_records_it(monkeypatch, capsy
     assert "ШАНС на " in out and "ФАЗА:" in out and "ОГОВОРКИ:" in out
     # only valmez has readings in these fixtures, so only valmez has a number
     assert "ПОДРОБНО (1 локация с лучшим шансом):" in out
-    assert "ОГОВОРКИ: нет свежего API30: 8 локаций" in out
+    missing = len(locations_lib.load_locations(SHIPPED)) - 1
+    assert f"ОГОВОРКИ: нет свежего API30: {missing} локаций" in out
     # all locations are listed, in the order of locations.yaml
     short_names = [loc.short_name for loc in locations_lib.load_locations(SHIPPED)]
     assert [out.index(f"{name} — ") for name in short_names] == sorted(
