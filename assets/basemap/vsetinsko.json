@@ -1,0 +1,90 @@
+{
+  "name": "vsetinsko",
+  "width": 1200,
+  "height": 1000,
+  "projection": "EPSG:3857",
+  "bbox": {
+    "min_lon": 17.749,
+    "min_lat": 49.16906695848169,
+    "max_lon": 18.449,
+    "max_lat": 49.54899925170674
+  },
+  "image": "vsetinsko.png",
+  "built_at": "2026-09-12T23:45:30Z",
+  "source": "OpenStreetMap via Overpass API (https://overpass-api.de/api/interpreter)",
+  "attribution": "© OpenStreetMap contributors",
+  "fetch_bbox": {
+    "min_lat": 49.16,
+    "min_lon": 17.74,
+    "max_lat": 49.56,
+    "max_lon": 18.46
+  },
+  "supersample": 2,
+  "palette_colors": 128,
+  "background": "#F6F4EE",
+  "labels": [
+    "Valašské Meziříčí",
+    "Vsetín",
+    "Rožnov pod Radhoštěm",
+    "Zubří",
+    "Vizovice"
+  ],
+  "layers": [
+    {
+      "name": "forest",
+      "colour": "#C9DABB",
+      "elements": 4224,
+      "drawn": 8695,
+      "holes": 4454,
+      "relations": 369,
+      "rings": 4241,
+      "ways": 3854
+    },
+    {
+      "name": "water",
+      "colour": "#B1D0E3",
+      "elements": 1038,
+      "drawn": 1050,
+      "holes": 12,
+      "relations": 11,
+      "rings": 994,
+      "waterways": 44,
+      "ways": 983
+    },
+    {
+      "name": "roads",
+      "colour": "#B7AEA0",
+      "elements": 1658,
+      "drawn": 1658,
+      "motorway": 16,
+      "primary": 971,
+      "secondary": 609,
+      "trunk": 62
+    },
+    {
+      "name": "places",
+      "colour": "#4A4640",
+      "elements": 6,
+      "drawn": 5,
+      "inside_bbox": 6
+    }
+  ],
+  "overpass_queries": [
+    {
+      "name": "forest",
+      "query": "[out:json][timeout:180];\n(\n  way[\"landuse\"=\"forest\"](49.16,17.74,49.56,18.46);\n  way[\"natural\"=\"wood\"](49.16,17.74,49.56,18.46);\n  relation[\"landuse\"=\"forest\"](49.16,17.74,49.56,18.46);\n  relation[\"natural\"=\"wood\"](49.16,17.74,49.56,18.46);\n);\nout geom;\n"
+    },
+    {
+      "name": "places",
+      "query": "[out:json][timeout:180];\nnode[\"place\"~\"^(city|town)$\"](49.16,17.74,49.56,18.46);\nout geom;\n"
+    },
+    {
+      "name": "roads",
+      "query": "[out:json][timeout:180];\nway[\"highway\"~\"^(motorway|trunk|primary|secondary)$\"](49.16,17.74,49.56,18.46);\nout geom;\n"
+    },
+    {
+      "name": "water",
+      "query": "[out:json][timeout:180];\n(\n  way[\"natural\"=\"water\"](49.16,17.74,49.56,18.46);\n  relation[\"natural\"=\"water\"](49.16,17.74,49.56,18.46);\n  way[\"waterway\"=\"river\"](49.16,17.74,49.56,18.46);\n);\nout geom;\n"
+    }
+  ]
+}
