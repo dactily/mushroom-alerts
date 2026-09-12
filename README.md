@@ -179,7 +179,12 @@ failures are soft by design.
   over all episodes, x a ramp over API30 x temperature gate x frost x both
   maps, applied to every day as a correction of the place, x a lead-time
   damping; rounded to 5 % inside 5-95 %, capped at 50 % without a fresh
-  station) and the conservative biological
+  station). A day with no usable API30 -- no number, or one from a stale or
+  missing release -- gets no percentage at all: the block says «нет данных»
+  and names the location under `ОГОВОРКИ`, because every neutral stand-in
+  sits above part of the moisture ramp and would let lost data raise the
+  result. Today falls back to the station's own API30 when only the forecast
+  release went stale. Alongside it stands the conservative biological
   verdict. All qualifying rain episodes are retained: a rain episode is a run
   of wet days (>= 1 mm), tolerating a single dry day inside it, that reaches
   20 mm over some 3-day window at 12-22 °C; two dry days end it, so two rains
@@ -195,7 +200,9 @@ failures are soft by design.
   `ОТПРАВЛЯТЬ: да|нет`, and stores the state it compared against in the
   `reports` table. Daily it speaks when a location's chance moved by 10
   points or more, when the best chance crossed 60 % either way, on the first
-  run, when a location is new, or when the error class changed. Hermes only
+  run, when a location is new, when a location gained or lost its number
+  («нет данных» on both sides is not news), or when the error class
+  changed. Hermes only
   re-words that block; durable notepads are no longer used.
   Transport results remain in Hermes `delivery_outcome`; they are not copied
   into the application database. Exactly-once delivery is not guaranteed.

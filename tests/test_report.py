@@ -12,6 +12,7 @@ drive -- it only picks which two locations get a technical line.
 
 from __future__ import annotations
 
+import json
 import re
 from datetime import date, timedelta
 
@@ -29,12 +30,17 @@ HORIZON = 16
 
 
 def chance_block(today, value, *, curve=None, capped=False):
-    """``views`` hands the report this shape; ``curve`` overrides by offset."""
+    """``views`` hands the report this shape; ``curve`` overrides by offset.
+
+    ``value=None`` is a location with no usable API30: the whole curve is
+    ``None`` and there is no peak, exactly as ``ChanceOutlook`` renders it.
+    """
     days = {
         today + timedelta(days=n): (curve or {}).get(n, value)
         for n in range(0, HORIZON + 1)
     }
-    peak = min(days.items(), key=lambda pair: (-pair[1], pair[0]))
+    known = {day: number for day, number in days.items() if number is not None}
+    peak = min(known.items(), key=lambda pair: (-pair[1], pair[0])) if known else None
     return {
         "today": days[today],
         "curve": days,
@@ -91,6 +97,7 @@ def location(
             # the derived curve for today -- the number the chance used, and
             # deliberately not the station's 23.7 mm
             "today_mm": 35.9,
+            "api30_quality": "fresh",
             "next_rain": (today + timedelta(days=5), 27.4),
         },
         "biological": {
@@ -451,11 +458,153 @@ def test_the_detail_line_prints_the_api30_the_chance_was_computed_from():
     assert "API30 36 мм (расчёт), станции нет" in text
 
 
+def test_a_stale_release_makes_the_line_print_the_station_number():
+    """``views`` falls back to the station for today, so the line does too.
+
+    Printing "API30 28 мм (расчёт)" under a percentage computed from the
+    station's 21 mm would be the same unreproducible line in a new disguise.
+    """
+    stale = brief(location())
+    stale["locations"][0]["forecast"]["api30_quality"] = "stale"
+    text = report_lib.render(summary(payload=stale), send=True, reason="тест")
+
+    assert "API30 24 мм (станция)" in text
+    assert "36 мм" not in text
+
+
 def test_a_location_without_a_chance_says_so():
     payload = brief(location())
     payload["locations"][0]["biological"].pop("chance")
     text = report_lib.render(summary(payload=payload), send=True, reason="тест")
     assert "  Valmez — нет данных" in text
+
+
+# ----------------------------------------------------------------------
+# «нет данных»: a location whose API30 is missing or stale (PLAN §9b)
+# ----------------------------------------------------------------------
+def test_a_location_without_a_number_is_not_detailed_but_is_explained():
+    """No number is not a low number: it is not ranked and it is named."""
+    item = summary(
+        payload=brief(
+            location(chance=None),
+            location(
+                slug="rajnochovice", name="Rajnochovice", short=None, chance=40
+            ),
+        )
+    )
+    text = report_lib.render(item, send=True, reason="тест")
+
+    assert "ШАНС на 12.09:\n  Valmez — нет данных\n  Rajnochovice — 40 %\n" in text
+    assert "ПОДРОБНО (1 локация с лучшим шансом):" in text
+    assert "  Rajnochovice 40 %:" in text
+    assert text.count("Valmez") == 2  # the chance line and the caveat, no detail
+    assert "ОГОВОРКИ: нет свежего API30: Valmez" in text
+
+
+def test_a_block_where_nothing_has_a_number_still_says_so_once():
+    item = summary(
+        payload=brief(
+            location(chance=None),
+            location(
+                slug="rajnochovice", name="Rajnochovice", short=None, chance=None
+            ),
+        )
+    )
+    text = report_lib.render(item, send=True, reason="тест")
+
+    assert "ПОДРОБНО: ни у одной локации нет числа" in text
+    assert text.count("ПОДРОБНО") == 1
+    assert "ОГОВОРКИ: нет свежего API30: Valmez, Rajnochovice" in text
+    assert report_lib.to_json(item, send=True, reason="тест")["detail"] == []
+
+
+def test_the_weekend_block_says_it_for_both_days():
+    item = summary("weekend", payload=brief(location(chance=None)))
+    text = report_lib.render(item, send=True, reason="тест")
+
+    assert "  Valmez — сб нет данных, вс нет данных\n" in text
+    assert "ПОДРОБНО: ни у одной локации нет числа" in text
+
+
+def test_the_missing_and_the_capped_are_both_named_in_the_caveats():
+    item = summary(
+        payload=brief(
+            location(chance=None),
+            location(
+                slug="rajnochovice",
+                name="Rajnochovice",
+                short=None,
+                chance=50,
+                capped=True,
+            ),
+        )
+    )
+    assert item["caveats"] == (
+        "нет свежего API30: Valmez, "
+        "без свежей станции шанс ограничен 50 %: Rajnochovice"
+    )
+
+
+def test_many_blind_locations_are_counted_not_listed():
+    payload = brief(
+        *(
+            location(slug=f"loc-{n}", name=f"Location {n}", short=None, chance=None)
+            for n in range(5)
+        )
+    )
+    assert summary(payload=payload)["caveats"] == "нет свежего API30: 5 локаций"
+
+
+@pytest.mark.parametrize(
+    "before, now, sends, needle",
+    [
+        (40, None, True, "Valmez: данные пропали"),
+        (None, 40, True, "Valmez: данные появились, шанс 40 %"),
+        (None, None, False, "ничего не изменилось с прошлого отчёта"),
+    ],
+)
+def test_a_number_appearing_or_disappearing_is_news(store, before, now, sends, needle):
+    """The block the user reads changed, so say it -- but silence stays silent."""
+    report_lib.publish(
+        store,
+        summary(today=FRIDAY, payload=brief(location(chance=before, today=FRIDAY))),
+    )
+    send, reason = report_lib.publish(
+        store, summary(today=TODAY, payload=brief(location(chance=now)))
+    )
+
+    assert send is sends
+    assert needle in reason
+
+
+def test_a_new_location_without_a_number_is_not_news(store):
+    """"New" and "was there, said nothing" are different rows, not one ``None``."""
+    report_lib.publish(store, summary(today=FRIDAY))
+    send, reason = report_lib.publish(
+        store,
+        summary(
+            today=TODAY,
+            payload=brief(
+                location(),
+                location(
+                    slug="rajnochovice",
+                    name="Rajnochovice",
+                    short=None,
+                    chance=None,
+                ),
+            ),
+        ),
+    )
+
+    assert send is False, reason
+
+
+def test_the_stored_state_keeps_a_missing_number_as_null(store):
+    item = summary(payload=brief(location(chance=None)))
+    report_lib.publish(store, item)
+
+    row = store.last_report("daily")
+    assert json.loads(row["chances_json"]) == {"valmez": None}
 
 
 def test_the_weekend_block_speaks_about_both_days():
@@ -534,7 +683,7 @@ def test_json_carries_the_same_fields(store):
     )
     assert payload["phase_text"].startswith("дождь прошёл 11.09")
     assert payload["error_class"] == "none"
-    assert payload["rules_version"] == "5"
+    assert payload["rules_version"] == "6"
     assert payload["locations"][0]["chance"] == 40
     assert payload["locations"][0]["chance_peak"] == ["2026-09-18", 70]
     assert payload["locations"][0]["verdict"] == "medium"
@@ -551,7 +700,7 @@ def test_the_stored_state_is_what_the_next_run_compares(store):
     assert '"valmez": 40' in row["chances_json"]
     assert '"valmez": "medium"' in row["verdicts_json"]
     assert "2026-09-18" in row["candidates_json"]
-    assert row["rules_version"] == "5"
+    assert row["rules_version"] == "6"
     assert store.last_report("daily", before=TODAY) is None
 
 

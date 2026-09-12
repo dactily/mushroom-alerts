@@ -159,7 +159,7 @@ def test_render_has_every_section(tmp_path):
     assert "температура почвы: 5 см 17.6 °C, 10 см 17.7 °C" in text
     assert "влажность: 81 %" in text
     assert "биологическая оценка (детерминированная):" in text
-    assert "вердикт сегодня: средняя (rules v5)" in text
+    assert "вердикт сегодня: средняя (rules v6)" in text
     assert "шанс сегодня: 45 %" in text
     assert "не подтверждение отдельных плодовых тел" in text
     assert "возможная высокая вероятность:" in text
@@ -444,10 +444,13 @@ def test_cli_brief_mode_daily_prints_the_block_and_records_it(monkeypatch, capsy
     assert "ПРИЧИНА: первый запуск" in out
     assert "ЗАГОЛОВОК: 🍄 Грибной прогноз: " in out
     assert "ШАНС на " in out and "ФАЗА:" in out and "ОГОВОРКИ:" in out
-    assert "ПОДРОБНО (2 локации с лучшим шансом):" in out
+    # only valmez has readings in these fixtures, so only valmez has a number
+    assert "ПОДРОБНО (1 локация с лучшим шансом):" in out
+    assert "ОГОВОРКИ: нет свежего API30: Bystřice" in out
     # both locations are listed, in the order of locations.yaml
     assert out.index("Valmez — ") < out.index("Bystřice — ")
     assert re.search(r"Valmez — \d+ %", out)
+    assert "Bystřice — нет данных" in out
     # no tables, no cheat sheet, no ISO dates
     assert "история 14 дн." not in out and "Как читать" not in out
     assert TODAY.isoformat() not in out

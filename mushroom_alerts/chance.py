@@ -53,6 +53,23 @@ those are different numbers now.  The categorical phase string stays in the
 output for the message wording; the arithmetic is in the ``factors``
 breakdown of :class:`DayChance`.
 
+No usable moisture number, no percentage
+----------------------------------------
+A missing API30 used to be treated as "no evidence either way" and enter as
+a neutral ×1.0.  That is arithmetically tidy and practically backwards: 1.0
+is a *better* multiplier than the ramp gives any API30 below 30 mm, so
+losing the number raised the result.  In an open window 20 mm scored 45 %
+and the same day with the number gone scored 55 % -- exactly the ten points
+the send rule reacts to, earned by losing data.  A stale forecast release
+did the same on a larger scale, and an empty database still reported the
+5 % floor as if something had been measured.
+
+So the rule is now the blunt one: without a usable API30 for that day there
+is **no number at all**.  :attr:`DayChance.value` is ``None``,
+:attr:`DayChance.insufficient` says so and :attr:`DayChance.reason` says
+why; the report prints «нет данных» and names the location in its caveats.
+A number that is absent is not a low number and must never be shown as one.
+
 Maps are a property of the place, not of the day
 ------------------------------------------------
 ČHMÚ and HoubyMapa publish no forecast.  The verdict therefore drops them
@@ -85,23 +102,40 @@ __all__ = [
 ]
 
 
+#: Why a day carries no number.  Machine-readable: the Russian wording is
+#: the report's business, not the arithmetic's.
+NO_API30 = "api30_missing"
+STALE_API30 = "api30_stale"
+
+
 @dataclass(frozen=True, slots=True)
 class DayChance:
-    """The chance for one day, plus what produced it."""
+    """The chance for one day, plus what produced it.
+
+    ``value`` is ``None`` when the day had no usable API30.  Nothing was
+    computed in that case: ``raw_percent`` is ``None``, ``factors`` is
+    empty, and ``reason`` carries :data:`NO_API30` or :data:`STALE_API30`.
+    """
 
     date: date | None
-    value: int
-    raw_percent: float
+    value: int | None
+    raw_percent: float | None
     capped: bool
     factors: tuple[tuple[str, float], ...]
+    insufficient: bool = False
+    reason: str = ""
 
     def as_dict(self) -> dict[str, Any]:
         return {
             "date": self.date,
             "value": self.value,
-            "raw_percent": round(self.raw_percent, 2),
+            "raw_percent": (
+                None if self.raw_percent is None else round(self.raw_percent, 2)
+            ),
             "capped": self.capped,
             "factors": [list(item) for item in self.factors],
+            "insufficient": self.insufficient,
+            "reason": self.reason,
         }
 
 
@@ -114,10 +148,11 @@ class ChanceOutlook:
 
     @property
     def peak(self) -> DayChance | None:
-        """The best day of the horizon; the earliest one wins a tie."""
-        if not self.outlook:
+        """The best day that has a number; the earliest one wins a tie."""
+        known = [item for item in self.outlook if item.value is not None]
+        if not known:
             return None
-        return min(self.outlook, key=lambda item: (-item.value, item.date or date.min))
+        return min(known, key=lambda item: (-(item.value or 0), item.date or date.min))
 
     @property
     def capped(self) -> bool:
@@ -173,20 +208,26 @@ def _phase_factor(days_since_anchor: Sequence[float]) -> float:
     )
 
 
-def _moisture_factor(
+def _unusable_reason(
     api30_mm: float | None, api30_quality: DataQuality | str | None
-) -> float:
-    """:data:`policy.CHANCE_MOISTURE_RAMP` at this API30.
+) -> str:
+    """Why this day has no usable API30, or ``""`` when it has one.
 
-    A missing number, or one from a stale/missing source, is not evidence
-    of dryness -- it is no evidence at all, so the factor is neutral and
-    the station cap (see :func:`assess_day_chance`) does the honest part.
+    A missing number is not evidence of dryness -- but it is not evidence of
+    moisture either, and every neutral value one could pick sits above part
+    of :data:`policy.CHANCE_MOISTURE_RAMP`, so any choice would let lost
+    data raise the number.  There is no percentage without a measurement.
     """
-    if api30_mm is None or _quality(api30_quality) in {
-        DataQuality.MISSING,
-        DataQuality.STALE,
-    }:
-        return policy.CHANCE_MOISTURE_UNKNOWN
+    quality = _quality(api30_quality)
+    if quality is DataQuality.STALE:
+        return STALE_API30
+    if api30_mm is None or quality is DataQuality.MISSING:
+        return NO_API30
+    return ""
+
+
+def _moisture_factor(api30_mm: float) -> float:
+    """:data:`policy.CHANCE_MOISTURE_RAMP` at this API30."""
     return _ramp(policy.CHANCE_MOISTURE_RAMP, float(api30_mm))
 
 
@@ -231,10 +272,26 @@ def assess_day_chance(
     frost (the verdict still refuses ``high`` on it).  ``chmi_level`` and
     ``houbymapa_score`` must already be ``None`` when the map is stale --
     freshness is the caller's read model, not arithmetic.
+
+    Without a usable ``api30_mm`` the day gets no number at all: see the
+    module docstring for why a neutral multiplier was worse than silence.
     """
+    reason = _unusable_reason(api30_mm, api30_quality)
+    if reason:
+        return DayChance(
+            date=day,
+            value=None,
+            raw_percent=None,
+            capped=False,
+            factors=(),
+            insufficient=True,
+            reason=reason,
+        )
+
     factors: list[tuple[str, float]] = [("phase", _phase_factor(days_since_anchor))]
 
-    factors.append(("moisture", _moisture_factor(api30_mm, api30_quality)))
+    # An empty ``reason`` already guarantees a number to stand on.
+    factors.append(("moisture", _moisture_factor(float(api30_mm))))  # type: ignore[arg-type]
     if not _temperature_ok(t_mean, t_min):
         factors.append(("temperature", policy.CHANCE_TEMPERATURE_FAILED))
     if frost_present:
@@ -280,8 +337,11 @@ def assess_day_chance(
     )
 
 
-def chance_for_day(**kwargs: Any) -> int:
-    """The percentage alone -- see :func:`assess_day_chance` for the inputs."""
+def chance_for_day(**kwargs: Any) -> int | None:
+    """The percentage alone -- see :func:`assess_day_chance` for the inputs.
+
+    ``None`` when the day had no usable API30 and therefore no number.
+    """
     return assess_day_chance(**kwargs).value
 
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from datetime import date, datetime, timezone
 
@@ -323,6 +324,30 @@ def test_v2_migration_copies_legacy_notifications(tmp_path):
         row = migrated.last_emission("valmez", "chmi_map")
         assert row["emission_key"] == "level:4"
         assert migrated.conn.execute("SELECT COUNT(*) FROM notifications").fetchone()[0] == 1
+
+
+def test_a_report_round_trips_a_location_without_a_number(store):
+    """``chances_json`` must keep ``null`` apart from "not in the report".
+
+    The send rule reads both: a slug that is absent is a new location, one
+    stored as ``null`` was there and had no usable API30.
+    """
+    store.save_report(
+        date(2026, 9, 12),
+        "daily",
+        chances={"valmez": None, "bystrice": 40},
+        verdicts={"valmez": "insufficient"},
+        candidates={},
+        events={},
+        error_class="none",
+        rules_version="6",
+        sent=True,
+        reason="тест",
+    )
+
+    row = store.last_report("daily")
+    assert json.loads(row["chances_json"]) == {"valmez": None, "bystrice": 40}
+    assert "katerinice" not in json.loads(row["chances_json"])
 
 
 def test_upsert_forecasts_ignores_observations(store):

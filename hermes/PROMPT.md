@@ -36,7 +36,9 @@ Daily, `send = да` when at least one holds:
    daily report;
 3. the best chance crossed 60 % in either direction;
 4. a location appeared that the last report did not have;
-5. `error_class` changed (`none` / `station` / `brief`); a dead ČHMÚ map or
+5. a location gained or lost its number («нет данных» → a percentage, or a
+   percentage → «нет данных»); «нет данных» on both sides is not news;
+6. `error_class` changed (`none` / `station` / `brief`); a dead ČHMÚ map or
    HoubyMapa never changes it and only appears in `ОГОВОРКИ`.
 
 With twenty locations the previous rule ("any verdict changed") fired
@@ -61,6 +63,14 @@ frost, and — for today only — the two maps; it is rounded to 5 % inside
 5–95 % and capped at 50 % when the station is missing or stale. It is not
 calibrated against finds and is not a probability: it says how much the
 site today looks like conditions under which mushrooms come.
+
+A day whose API30 is absent or comes from a stale release gets **no number
+at all**: the block prints «нет данных» for it, names it under `ОГОВОРКИ`
+(«нет свежего API30»), and leaves it out of `ПОДРОБНО`. A missing
+measurement used to enter as a neutral multiplier, which raised the result —
+20 mm scored 45 % and no number at all scored 55 %. Today falls back to the
+station's own API30 when only the forecast release went stale, so an old
+release costs the forecast days and not the day that was measured.
 
 ## Biological verdict v3
 

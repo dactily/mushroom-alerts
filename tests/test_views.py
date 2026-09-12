@@ -477,7 +477,9 @@ def test_a_poor_map_lowers_the_forecast_days_too(tmp_path):
     assert bio["guidance"]["outlook"][1]["verdict"] == "high"
 
 
-def _rain_history(rain: dict[int, float]) -> list[Reading]:
+def _rain_history(
+    rain: dict[int, float], *, api30_mm: float | None = None
+) -> list[Reading]:
     """Station history at a steady 15 °C, with rain only on the named days."""
     rows: list[Reading] = []
     for offset in range(-35, 1):
@@ -490,10 +492,17 @@ def _rain_history(rain: dict[int, float]) -> list[Reading]:
         ]
         if offset >= -7:
             rows.append(Reading("chmi_station", VALMEZ.slug, day, "t_min", 8.0))
+    if api30_mm is not None:
+        rows.append(
+            Reading("chmi_station", VALMEZ.slug, TODAY, "api30_mm", api30_mm)
+        )
     return rows
 
 
-def _flat_curve(mm: float, days: int = 12) -> list[Reading]:
+def _flat_curve(
+    mm: float, days: int = 12, *, issued: date | None = None
+) -> list[Reading]:
+    issued = TODAY if issued is None else issued
     return [
         Reading(
             "api30_forecast",
@@ -503,14 +512,15 @@ def _flat_curve(mm: float, days: int = 12) -> list[Reading]:
             mm,
             meta={
                 "quality": "fresh",
-                **({"issued": TODAY.isoformat()} if offset else {}),
+                **({"issued": issued.isoformat()} if offset else {}),
             },
         )
         for offset in range(days)
     ]
 
 
-def _flat_weather(days: int = 12) -> list[Reading]:
+def _flat_weather(days: int = 12, *, issued: date | None = None) -> list[Reading]:
+    issued = TODAY if issued is None else issued
     return [
         Reading(
             "openmeteo",
@@ -518,7 +528,7 @@ def _flat_weather(days: int = 12) -> list[Reading]:
             TODAY + timedelta(days=offset),
             metric,
             value,
-            meta={"issued": TODAY.isoformat()} if offset else None,
+            meta={"issued": issued.isoformat()} if offset else None,
         )
         for offset in range(days)
         for metric, value in (("t_mean", 15.0), ("t_min", 8.0))
@@ -555,6 +565,76 @@ def test_a_second_rain_does_not_hide_an_open_growth_window(tmp_path):
     assert one["guidance"]["dominant_event_id"] == two["guidance"][
         "dominant_event_id"
     ]
+
+
+# ----------------------------------------------------------------------
+# no usable moisture number, no percentage
+# ----------------------------------------------------------------------
+OPEN_WINDOW = {-8: 25.0}
+CHMI_3 = [Reading("chmi_map", VALMEZ.slug, TODAY, "level", 3.0)]
+
+
+def test_losing_the_api30_takes_the_number_away_instead_of_raising_it(tmp_path):
+    """45 % with 20 mm, and 55 % with nothing -- ten points for lost data."""
+    with Store(tmp_path / "with.sqlite") as store:
+        store.upsert_readings(_rain_history(OPEN_WINDOW) + CHMI_3, retrieved_at=stamp(5))
+        store.upsert_readings(_flat_weather(), retrieved_at=stamp(6))
+        store.upsert_readings(_flat_curve(20.0), retrieved_at=stamp(7))
+        measured = location_snapshot(store, VALMEZ, TODAY)["biological"]["chance"]
+
+    with Store(tmp_path / "without.sqlite") as store:
+        store.upsert_readings(_rain_history(OPEN_WINDOW) + CHMI_3, retrieved_at=stamp(5))
+        store.upsert_readings(_flat_weather(), retrieved_at=stamp(6))
+        blind = location_snapshot(store, VALMEZ, TODAY)["biological"]["chance"]
+
+    assert measured["today"] == 45  # 0.60 x 0.8 (20 mm) x 0.9 (ČHMÚ 3/5)
+    assert blind["today"] is None
+    assert blind["peak"] is None
+    assert blind["capped"] is False
+
+
+def test_today_falls_back_to_the_station_when_the_run_is_stale(tmp_path):
+    """A three-day-old release scored its days ``fresh`` and stayed high.
+
+    ``api30_quality_by_date`` describes a value inside its release; the age
+    of the release never reached the chance, so a stale run kept producing
+    numbers while the verdict refused ``high`` on ``forecast_not_fresh``.
+    The forecast days now have no number, and today uses what the station
+    measured this morning instead of going blind with them.
+    """
+    issued = TODAY - timedelta(days=3)
+    with Store(tmp_path / "stale.sqlite") as store:
+        store.upsert_readings(
+            _rain_history(OPEN_WINDOW, api30_mm=20.0) + CHMI_3, retrieved_at=stamp(5)
+        )
+        store.upsert_readings(
+            _flat_weather(issued=issued), retrieved_at=stamp(6) - timedelta(days=3)
+        )
+        store.upsert_readings(
+            _flat_curve(28.0, issued=issued), retrieved_at=stamp(7) - timedelta(days=3)
+        )
+        snap = location_snapshot(store, VALMEZ, TODAY)
+
+    bio = snap["biological"]
+    assert snap["forecast"]["api30_run_quality"] == "stale"
+    # the station's own 20 mm, not the stale curve's 28 mm (which scored 60 %)
+    assert bio["chance"]["today"] == 45
+    assert set(bio["chance"]["curve"].values()) == {45, None}
+    assert bio["chance"]["curve"][TODAY + timedelta(days=1)] is None
+    assert bio["chance"]["peak"] == (TODAY, 45)
+    assert "forecast_not_fresh" in bio["guidance"]["high_blockers"]
+
+
+def test_an_empty_database_has_no_number_to_report(tmp_path):
+    with Store(tmp_path / "empty.sqlite") as store:
+        snap = location_snapshot(store, VALMEZ, TODAY)
+
+    assert snap["biological"]["chance"] == {
+        "today": None,
+        "curve": {TODAY: None},
+        "peak": None,
+        "capped": False,
+    }
 
 
 def test_a_stale_station_caps_the_chance(tmp_path):

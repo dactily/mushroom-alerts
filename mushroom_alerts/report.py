@@ -25,6 +25,13 @@ before, and the script knows none of that.  So the block is a list of
 sorted, never advising.  The single place where the script does order
 something is picking the two locations that get a technical line under
 ``ПОДРОБНО``.
+
+A location may also have no number at all: :mod:`~mushroom_alerts.chance`
+refuses to invent one when that day's API30 is missing or stale.  It prints
+«нет данных» in the list, is named under ``ОГОВОРКИ`` with the reason, and
+is not eligible for ``ПОДРОБНО`` -- a technical line explaining a headline
+that says there is no number explains nothing.  Gaining or losing a number
+is news; having none on both sides is not.
 """
 
 from __future__ import annotations
@@ -79,6 +86,10 @@ _PHASE_RANK = {
 }
 
 WEEKDAY_NAMES = ("сб", "вс")
+
+#: ``DataQuality`` values a number may still be used for.  Spelled out
+#: rather than imported: everything ``report`` reads is already plain JSON.
+USABLE_QUALITY = frozenset({"fresh", "partial"})
 
 SOURCE_WORDS = {
     "chmi_map": "карта ČHMÚ недоступна",
@@ -189,7 +200,14 @@ def _location_summary(
     # curve, while the station reports what it measured.  They differ by a
     # lot (36 mm against 24 mm on 12.09.2026), so the reader could not
     # reproduce the percentage from the line that was meant to explain it.
-    api30 = forecast.get("today_mm")
+    # Which of the two the chance used is a question of freshness: ``views``
+    # falls back to the station for today once the derived point or the
+    # release carrying it is unusable, and this line follows it.
+    api30 = (
+        forecast.get("today_mm")
+        if forecast.get("api30_quality") in USABLE_QUALITY
+        else None
+    )
     api30_station = station.get("api30_mm")
 
     candidate = _as_date(guidance.get("candidate_high_date"))
@@ -281,23 +299,32 @@ def _headline_phase(summaries: Sequence[Mapping[str, Any]]) -> str:
     return _phase_sentence(max(summaries, key=lambda item: _PHASE_RANK.get(item["phase"], 0)))
 
 
+def _who(names: Sequence[str]) -> str:
+    """Name them -- but naming twenty is longer than the list itself."""
+    return (
+        ", ".join(names)
+        if len(names) <= CAVEAT_NAMES
+        else f"{len(names)} {_locations_word(len(names))}"
+    )
+
+
 def _caveats(
     summaries: Sequence[Mapping[str, Any]],
     notes: Sequence[str],
     failed_sources: Sequence[str],
     error_class: str,
+    mode: str,
 ) -> str:
     words = [SOURCE_WORDS.get(source, f"{source}: нет данных") for source in failed_sources]
+    blind = [item["short_name"] for item in summaries if _rank(item, mode) is None]
+    if blind:
+        # The «нет данных» lines above, explained once instead of per line.
+        words.append(f"нет свежего API30: {_who(blind)}")
     capped = [item["short_name"] for item in summaries if item["chance_capped"]]
     if capped:
-        # Naming twenty locations would be longer than the list itself.
-        who = (
-            ", ".join(capped)
-            if len(capped) <= CAVEAT_NAMES
-            else f"{len(capped)} {_locations_word(len(capped))}"
-        )
         words.append(
-            f"без свежей станции шанс ограничен {policy.CHANCE_NO_STATION_CAP} %: {who}"
+            f"без свежей станции шанс ограничен {policy.CHANCE_NO_STATION_CAP} %: "
+            f"{_who(capped)}"
         )
     if error_class == "brief" and not words:
         words.append("бриф не собрался")
@@ -345,7 +372,7 @@ def summarize(
         "error_class": klass,
         "rules_version": policy.RULES_VERSION,
         "caveats": _caveats(
-            summaries, brief.get("notes") or (), failed_sources, klass
+            summaries, brief.get("notes") or (), failed_sources, klass, mode
         ),
     }
 
@@ -403,6 +430,12 @@ def decide(store: Store, summary: Mapping[str, Any]) -> tuple[bool, str]:
     smoothly, so the rule is about the size of the move: ten points
     anywhere, or the best location crossing 60 % in either direction.
 
+    A location can also have no number at all («нет данных»).  Appearing or
+    disappearing is news either way -- the block the user reads changes --
+    while «нет данных» on both sides is not, however long it lasts.  A
+    location that is absent from the stored state is new; one stored as
+    ``null`` was there and had nothing to say.
+
     The comparison is always against the last report from an *earlier*
     date, so running the same mode twice on one day yields the same answer.
     """
@@ -426,12 +459,16 @@ def decide(store: Store, summary: Mapping[str, Any]) -> tuple[bool, str]:
         name = item["short_name"]
         now = state["chances"][item["slug"]]
         before = old_chances.get(item["slug"])
-        if before is None:
+        if item["slug"] not in old_chances:
             if now is not None:
                 reasons.append(f"{name}: новая локация, шанс {now} %")
             continue
-        if now is None:
-            reasons.append(f"{name}: шанс больше не считается")
+        if before is None and now is None:
+            continue  # nothing to say yesterday, nothing to say today
+        if before is None:
+            reasons.append(f"{name}: данные появились, шанс {now} %")
+        elif now is None:
+            reasons.append(f"{name}: данные пропали")
         elif abs(now - int(before)) >= policy.CHANCE_MOVE_PCT:
             reasons.append(f"{name}: шанс {int(before)} % → {now} %")
 
@@ -492,21 +529,29 @@ def _rank(item: Mapping[str, Any], mode: str) -> int | None:
 
 
 def _leaders(summary: Mapping[str, Any]) -> list[Mapping[str, Any]]:
-    """The best locations by chance; a tie is broken by the config order."""
+    """The best locations by chance; a tie is broken by the config order.
+
+    Only locations that have a number: a technical line about a place whose
+    headline already says «нет данных» explains nothing.
+    """
     mode = str(summary["mode"])
-    ordered = sorted(
-        enumerate(summary["locations"]),
-        key=lambda pair: (-(_rank(pair[1], mode) or -1), pair[0]),
-    )
-    return [item for _, item in ordered[:DETAIL_LOCATIONS]]
+    ranked = [
+        (index, item, rank)
+        for index, item in enumerate(summary["locations"])
+        if (rank := _rank(item, mode)) is not None
+    ]
+    ordered = sorted(ranked, key=lambda row: (-row[2], row[0]))
+    return [item for _, item, _ in ordered[:DETAIL_LOCATIONS]]
 
 
 def _api30_fact(item: Mapping[str, Any]) -> str:
     """``API30 36 мм (расчёт), станция 24 мм`` -- both, never one as both.
 
-    The chance uses the derived curve, so that number comes first and says
-    so; the measurement follows, because it is the one the cap is about.
-    One line either way.
+    The chance uses the derived curve while it is usable, so that number
+    comes first and says so; the measurement follows, because it is the one
+    the cap is about.  Once the derived value is unusable the chance falls
+    back to the station for today, and ``item["api30_mm"]`` arrives as
+    ``None``, so the line prints the measurement alone.  One line either way.
     """
     used, measured = item["api30_mm"], item["api30_station_mm"]
     if used is None:
@@ -600,6 +645,8 @@ def render(summary: Mapping[str, Any], *, send: bool, reason: str) -> str:
             f"ПОДРОБНО ({len(details)} {_locations_word(len(details))} с лучшим шансом):"
         )
         lines += [f"  {line}" for line in details]
+    elif summary["locations"]:
+        lines.append("ПОДРОБНО: ни у одной локации нет числа")
     lines.append(f"ОГОВОРКИ: {summary['caveats']}")
     return "\n".join(lines) + "\n"
 

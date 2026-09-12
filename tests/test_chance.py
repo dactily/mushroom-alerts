@@ -194,14 +194,43 @@ def test_the_human_readable_bands_are_still_published():
     assert "15" in policy.interpretation_guide()
 
 
-def test_an_unusable_api30_is_neutral_not_dry():
-    """No number is no evidence; the station cap does the honest part."""
-    assert raw(api30_mm=None) == pytest.approx(60.0)
-    assert raw(api30_quality=DataQuality.STALE) == pytest.approx(60.0)
-    assert raw(api30_quality="missing") == pytest.approx(60.0)
-    assert raw(api30_quality="nonsense") == pytest.approx(60.0)
-    # a partial day still carries its measurement
+@pytest.mark.parametrize(
+    "kw, reason",
+    [
+        (dict(api30_mm=None), chance_lib.NO_API30),
+        (dict(api30_quality="missing"), chance_lib.NO_API30),
+        (dict(api30_quality="nonsense"), chance_lib.NO_API30),
+        (dict(api30_quality=DataQuality.STALE), chance_lib.STALE_API30),
+    ],
+)
+def test_an_unusable_api30_leaves_the_day_without_a_number(kw, reason):
+    """No usable measurement, no percentage -- and nothing computed at all.
+
+    A missing API30 used to enter as a neutral x1.0, which is above the
+    moisture ramp everywhere below 30 mm: the number went *up* when the
+    measurement disappeared (45 % -> 55 % in an open window, exactly the
+    ten points the send rule reacts to).
+    """
+    item = chance_lib.assess_day_chance(**{**NEUTRAL, **kw})
+
+    assert item.value is None
+    assert item.insufficient is True
+    assert item.reason == reason
+    assert item.raw_percent is None
+    assert item.factors == ()
+    assert item.capped is False
+
+
+def test_a_partial_api30_still_carries_its_measurement():
     assert raw(api30_quality=DataQuality.PARTIAL) == pytest.approx(48.0)
+    assert chance(api30_quality=DataQuality.PARTIAL) == 50
+
+
+def test_a_missing_api30_is_never_worth_more_than_a_measured_one():
+    """The property the neutral multiplier broke, stated directly."""
+    measured = [chance(api30_mm=mm) for mm in (0.0, 10.0, 20.0, 30.0, 45.0)]
+    assert all(value is not None for value in measured)
+    assert chance(api30_mm=None) is None
 
 
 # ----------------------------------------------------------------------
@@ -449,7 +478,12 @@ def test_a_dead_station_caps_the_whole_curve():
     assert set(payload.as_dict()["curve"].values()) == {policy.CHANCE_NO_STATION_CAP}
 
 
-def test_the_horizon_always_evaluates_today_even_without_a_curve():
+def test_an_empty_database_reports_no_number_at_all():
+    """The floor used to be printed for a location nothing was measured for.
+
+    5 %, ``capped: false`` -- a number that looks like a dry forest and is
+    really an empty table.  Today is still evaluated, and says so.
+    """
     outlook = chance_lib.assess_chance_horizon(
         TODAY,
         [],
@@ -463,9 +497,17 @@ def test_the_horizon_always_evaluates_today_even_without_a_curve():
         houbymapa_score=None,
         station_available=False,
     )
-    # no episode, no moisture, no temperature: 5 % x 1.0 x 0.6 = 3 % -> 5 %
-    assert outlook.current.value == policy.CHANCE_MIN
-    assert outlook.as_dict()["curve"] == {TODAY: policy.CHANCE_MIN}
+
+    assert outlook.current.date == TODAY
+    assert outlook.current.value is None
+    assert outlook.current.insufficient is True
+    assert outlook.peak is None
+    assert outlook.as_dict() == {
+        "today": None,
+        "curve": {TODAY: None},
+        "peak": None,
+        "capped": False,
+    }
 
 
 def test_past_days_are_dropped_and_never_damped():

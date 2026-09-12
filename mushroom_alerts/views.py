@@ -131,6 +131,58 @@ def _input_openmeteo_run(store: Store, api_run: Any, slug: str) -> Any:
     return None
 
 
+def _quality_of(value: Any) -> DataQuality:
+    """A stored ``quality`` string as an enum; anything unknown is missing."""
+    try:
+        return value if isinstance(value, DataQuality) else DataQuality(str(value))
+    except ValueError:
+        return DataQuality.MISSING
+
+
+def _chance_moisture(
+    forecast: dict[str, Any],
+    station: dict[str, Any] | None,
+    station_status: dict[str, Any],
+    today: date,
+) -> tuple[dict[date, float], dict[date, DataQuality]]:
+    """The API30 the chance may use, per day, with an honest quality.
+
+    Two corrections to what ``api30_quality_by_date`` says on its own:
+
+    * a point's quality describes the value *inside* its release and says
+      nothing about the age of the release, so a three-day-old run used to
+      hand the chance a curve of ``fresh`` days.  Every day is therefore
+      capped by ``api30_run_quality``: a stale release makes its days
+      unusable, and without a number the chance reports none at all;
+    * that alone would blind today as well, even though the station measured
+      its own API30 this morning.  So **today only** falls back to the
+      station's latest API30 with the station's own quality, whenever the
+      derived curve for today is unusable and the station value is fresh or
+      partial.  A forecast release going stale then costs the forecast days,
+      not the day we actually have a measurement for.
+    """
+    curve = dict(forecast.get("curve") or [])
+    run_quality = _quality_of(forecast.get("api30_run_quality"))
+    qualities = {
+        day: quality_worst(_quality_of(value), run_quality)
+        for day, value in (forecast.get("api30_quality_by_date") or {}).items()
+    }
+    for day in curve:  # a value nobody described is a value nobody may use
+        qualities.setdefault(day, DataQuality.MISSING)
+
+    usable = {DataQuality.FRESH, DataQuality.PARTIAL}
+    station_value = (station or {}).get("api30_mm")
+    station_quality = _quality_of(station_status.get("quality"))
+    if (
+        qualities.get(today) not in usable
+        and station_value is not None
+        and station_quality in usable
+    ):
+        curve[today] = float(station_value)
+        qualities[today] = station_quality
+    return curve, qualities
+
+
 def _biological_features(
     store: Store,
     slug: str,
@@ -234,7 +286,8 @@ def forecast_bundle(
     )
     api_point_qualities = _point_qualities(store, api_run_id, slug)
     api_today_quality = api_point_qualities.get(today, DataQuality.MISSING)
-    api_quality = quality_worst(_run_quality(api_run, today), api_today_quality)
+    api_run_quality = _run_quality(api_run, today)
+    api_quality = quality_worst(api_run_quality, api_today_quality)
     open_quality = _run_quality(open_run, today)
     qualities = (open_quality, api_quality)
     quality = quality_worst(*qualities)
@@ -242,6 +295,10 @@ def forecast_bundle(
         "quality": quality.value,
         "openmeteo_quality": qualities[0].value,
         "api30_quality": qualities[1].value,
+        # Two different things, and a caller that needs to judge a day needs
+        # both: the point quality says what that day's value is worth inside
+        # the release, ``api30_run_quality`` says how old the release is.
+        "api30_run_quality": api_run_quality.value,
         "api30_quality_by_date": {
             day: point_quality.value for day, point_quality in api_point_qualities.items()
         },
@@ -414,14 +471,17 @@ def location_snapshot(
         threshold_mm=float(forecast.get("threshold_mm", policy.API30_THRESHOLD_MM)),
     )
     biological["guidance"] = assessment.as_dict()
+    chance_api30, chance_qualities = _chance_moisture(
+        forecast, out["station"], out["source_status"][STATION], today
+    )
     biological["chance"] = chance_lib.assess_chance_horizon(
         today,
         # The chance ramps over the days since a rain instead of reading the
         # phase word, so it needs the anchors, not the verdict's categories.
         [episode.anchor for episode in episodes],
         list(api_curve),
-        api30=api_curve,
-        api30_quality=api_qualities,
+        api30=chance_api30,
+        api30_quality=chance_qualities,
         t_mean=forecast.get("t_mean") or {},
         t_min=forecast.get("t_min") or {},
         frost_present=bool(frost.get("present")),
