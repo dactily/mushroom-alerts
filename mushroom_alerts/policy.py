@@ -16,6 +16,14 @@ RAIN_EPISODE_DAYS = 3
 RAIN_EPISODE_MM = 20.0
 RAIN_T_MEAN_MIN = 12.0
 RAIN_T_MEAN_MAX = 22.0
+
+#: A day counts as wet from this much rain.  Below it the day is dry; a day
+#: with no number at all is neither (see ``biology._wet_spells``).
+RAIN_WET_DAY_MM = 1.0
+
+#: How many dry days may sit inside one wet spell.  One: a shower that
+#: pauses for a day is still one spell, two dry days end it.
+RAIN_EPISODE_GAP_DAYS = 1
 GROWTH_WINDOW_FROM_DAYS = 7
 GROWTH_WINDOW_TO_DAYS = 12
 GROWTH_RESIDUAL_TO_DAYS = 21
@@ -112,7 +120,7 @@ def interpretation_guide() -> str:
 1. API30 — сумма осадков за {API30_WINDOW_DAYS} дней с затуханием {API30_DECAY}/сут (формула ČHMÚ, воспроизведена точно).
 2. Ориентировочные полосы API30 для чтения глазами, НЕ откалиброваны: <{dry:g} мм сухо, {dry:g}–{moderate:g} мм умеренно, {moderate:g}–{wet:g} мм хорошо, >{wet:g} мм очень влажно. В расчёте шанса эти полосы не используются: там влага входит плавной кривой из п. 6, поэтому узлы там другие.
 3. Рабочий порог API30 {API30_THRESHOLD_MM:g} мм пока не перекалиброван.
-4. Дождевой эпизод: ≥{RAIN_EPISODE_MM:g} мм за {RAIN_EPISODE_DAYS} календарных дня при средней температуре {RAIN_T_MEAN_MIN:g}–{RAIN_T_MEAN_MAX:g} °C; предполагаемое окно D+{GROWTH_WINDOW_FROM_DAYS}...D+{GROWTH_WINDOW_TO_DAYS}.
+4. Дождевой эпизод: подряд идущие влажные дни (≥{RAIN_WET_DAY_MM:g} мм за сутки; внутри эпизода допускается не больше {RAIN_EPISODE_GAP_DAYS} сухого дня, два сухих дня его закрывают), если где-то внутри набирается ≥{RAIN_EPISODE_MM:g} мм за {RAIN_EPISODE_DAYS} календарных дня при средней температуре {RAIN_T_MEAN_MIN:g}–{RAIN_T_MEAN_MAX:g} °C. День без данных не влажный и не сухой: эпизод он не рвёт. Два дождя, разделённые сухими днями, остаются двумя эпизодами со своими пиками; предполагаемое окно каждого — D+{GROWTH_WINDOW_FROM_DAYS}...D+{GROWTH_WINDOW_TO_DAYS} от его пика.
 5. Высокая вероятность допустима только внутри основного окна D+{GROWTH_WINDOW_FROM_DAYS}...D+{GROWTH_WINDOW_TO_DAYS}: до него свежий дождь даёт максимум среднюю. После него до D+{GROWTH_RESIDUAL_TO_DAYS} сохраняется остаточная вероятность максимум средней силы. Дополнительно для высокой нужны свежий API30 ≥{API30_THRESHOLD_MM:g} мм, средняя температура {API30_T_MEAN_MIN:g}–{API30_T_MEAN_MAX:g} °C, минимум > {API30_T_MIN_ABOVE:g} °C, достаточная история, отсутствие заморозка за 7 завершённых станционных суток и — только для сегодняшнего дня — свежая высокая поддержка хотя бы одной карты. Карты прогноза не публикуют, поэтому в вердикте на будущие дни их уровень не влияет ни в плюс, ни в минус (в проценте шанса они учитываются иначе — см. п. 6).
 6. Шанс в процентах — сравнимое между локациями число, НЕ вероятность находки; все составляющие перемножаются: (а) фаза — плавная кривая по числу дней от пика дождя ({_ramp_text(CHANCE_PHASE_RAMP, " дн")}), между узлами линейно, при нескольких эпизодах берётся максимум; (б) влага — плавная кривая по API30 ({_ramp_text(CHANCE_MOISTURE_RAMP, " мм")}), без пригодного числа влага нейтральна ×{CHANCE_MOISTURE_UNKNOWN:g}; (в) ×{CHANCE_TEMPERATURE_FAILED:g} при невыполненном температурном условии и ×{CHANCE_FROST:g} при заморозке; (г) поправка места по сегодняшним картам — HoubyMapa ×({CHANCE_HOUBYMAPA_BASE:g}+{CHANCE_HOUBYMAPA_SPAN:g}·score), ČHMÚ ×({CHANCE_CHMI_BASE:g}+{CHANCE_CHMI_STEP:g}·(уровень−{CHANCE_CHMI_PIVOT:g})) — применяется ко всем дням горизонта: карты описывают в основном рельеф и почву, и относительный порядок мест держится дольше одного дня; устаревшая карта не участвует вовсе; (д) поправка на дальность прогноза ({_ramp_text(CHANCE_HORIZON_DAMPING, " дн")}). Округление до {CHANCE_STEP} %, диапазон {CHANCE_MIN}–{CHANCE_MAX} %; без свежей станции число ограничено {CHANCE_NO_STATION_CAP} %. Кривые непрерывны, поэтому по одному слову фазы число дня уже не восстанавливается — слово осталось только для формулировки.
 7. Карта ČHMÚ — модельный ориентир по микоризным видам (hřib, kozák, liška), а не доказательство наличия грибов; опята и дереворазрушающие виды она не описывает.

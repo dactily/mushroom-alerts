@@ -24,7 +24,8 @@ Triggers (PLAN §3, one per location, any of them fires exit ``10``)
     primary window derived from all stored rain episodes and the station's
     API30 is still at/above the threshold, i.e. the ground really did stay
     wet. A newer rain still in its waiting phase cannot hide an older active
-    window.
+    window: episodes are split on dry gaps (``biology._wet_spells``), so the
+    two rains stay two episodes and the older one keeps its own anchor.
 ``api30_cross``
     The forecast API30 curve crosses the threshold upward on some day *D*
     ahead (today is still below it), and Open-Meteo's temperature on *D*

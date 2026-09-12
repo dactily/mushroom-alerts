@@ -64,10 +64,13 @@ site today looks like conditions under which mushrooms come.
 
 ## Biological verdict v3
 
-A rain episode requires at least 20 mm over three calendar days and complete
-temperature coverage with a mean of 12–22 °C. Overlapping qualifying windows
-are merged into one wet spell; separated spells remain independent. An older
-active episode outranks a newer episode that is still waiting.
+A rain episode is a run of wet days (≥ 1 mm in a day) that reaches at least
+20 mm over some three calendar days with complete temperature coverage and a
+mean of 12–22 °C. One dry day may sit inside an episode; two dry days end it,
+so two rains a week apart stay two episodes with two anchors instead of
+collapsing into one anchored on the newer rain. A day with no measurement is
+neither wet nor dry and never splits an episode. An older active episode
+outranks a newer episode that is still waiting.
 
 Before D+7 the current verdict cannot be high, even if API30 already exceeds
 25 mm or HoubyMapa is high. High is allowed only in the D+7...D+12 primary

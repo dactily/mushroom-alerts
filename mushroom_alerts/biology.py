@@ -1,9 +1,19 @@
 """Pure biological timing model built from normalized daily series.
 
 Rainfall is stored as daily observations.  This module derives repeatable
-events from that history, merges overlapping rolling windows from the same
-wet spell, and evaluates every relevant event for a requested day.  A newer
-rain must not hide an older window that is already active.
+events from that history and evaluates every relevant event for a requested
+day.  A newer rain must not hide an older window that is already active.
+
+An episode is built from the **wet days themselves**.  It used to be built
+by grouping every qualifying rolling window and merging the ones whose
+spans touched, and because a three-day window reaches two days back, two
+rains five dry days apart still touched: they collapsed into one episode
+whose anchor jumped to the newer rain, and the older -- currently open --
+growth window vanished with it.  More rain then produced a *lower* chance
+(25 mm seven days ago: 65 %; plus 30 mm two days ago: 10 %).  Now the wet
+days are clustered first and each cluster keeps its own anchor, so the
+``max`` over episodes in :mod:`~mushroom_alerts.chance` really does protect
+an open window.
 """
 
 from __future__ import annotations
@@ -14,7 +24,7 @@ from hashlib import sha256
 from typing import Any, Mapping, Sequence
 
 from . import policy
-from .base import DataQuality, SeriesPoint
+from .base import DataQuality, SeriesPoint, WindowAggregate
 from .quality import calendar_window
 
 __all__ = [
@@ -29,7 +39,16 @@ __all__ = [
 
 @dataclass(frozen=True, slots=True)
 class RainEpisode:
-    """One wet spell, possibly formed by several qualifying rolling windows."""
+    """One wet spell: its own wet days, not the window that qualified it.
+
+    ``start`` and ``end`` are the first and the last wet day of the spell,
+    ``anchor`` its wettest day (a tie goes to the later one).  Every
+    aggregate below -- ``total_mm``, ``covered_days``, ``expected_days``,
+    ``quality``, ``lower_bound``, ``temperature_mean_c`` and
+    ``temperature_covered_days`` -- describes exactly that ``start..end``
+    span.  The :data:`policy.RAIN_EPISODE_DAYS`-day rolling window that made
+    the spell qualify is a gate, not a report: it is not published here.
+    """
 
     event_id: str
     location: str
@@ -121,12 +140,6 @@ class BiologicalAssessment:
         return current
 
 
-@dataclass(frozen=True, slots=True)
-class _QualifiedWindow:
-    start: date
-    end: date
-
-
 def _value(raw: float | SeriesPoint | None) -> float | None:
     """Numeric value of a series entry, or ``None`` when it carries none.
 
@@ -145,25 +158,99 @@ def _event_id(location: str, start: date) -> str:
     return "rain-" + sha256(material).hexdigest()[:16]
 
 
-def _episode_from_group(
+def _wet_spells(
+    rain_points: Mapping[date, float | SeriesPoint], today: date
+) -> list[list[date]]:
+    """Group the wet days of the history into spells, oldest first.
+
+    A day is wet from :data:`policy.RAIN_WET_DAY_MM` upwards.  At most
+    :data:`policy.RAIN_EPISODE_GAP_DAYS` dry days may sit inside one spell,
+    because a shower that pauses for a day is still one wet spell; two dry
+    days end it.
+
+    A day carrying no number -- absent from the series, or a point whose
+    value is ``None`` -- is neither wet nor dry.  A hole in the station
+    series is not evidence that the ground stayed dry, so an unknown day
+    **neither extends a spell nor splits one**; it is simply skipped.  The
+    price of that choice is that a spell may bridge a long gap in the data,
+    and what says so is the quality gate of :func:`_qualifying_window`
+    (missing or stale rain never qualifies) together with ``lower_bound`` on
+    the reported span.
+    """
+    spells: list[list[date]] = []
+    current: list[date] = []
+    dry_run = 0
+    for day in sorted(day for day in rain_points if day <= today):
+        value = _value(rain_points[day])
+        if value is None:
+            continue
+        if value >= policy.RAIN_WET_DAY_MM:
+            if current and dry_run > policy.RAIN_EPISODE_GAP_DAYS:
+                spells.append(current)
+                current = []
+            current.append(day)
+            dry_run = 0
+        elif current:
+            dry_run += 1
+    if current:
+        spells.append(current)
+    return spells
+
+
+def _qualifying_window(
+    spell: Sequence[date],
+    rain_points: Mapping[date, float | SeriesPoint],
+    temperature_points: Mapping[date, float | SeriesPoint],
+) -> WindowAggregate | None:
+    """The best qualifying rolling window inside one spell, or ``None``.
+
+    The window ends on a wet day of the spell and reaches up to
+    :data:`policy.RAIN_EPISODE_DAYS` days back from it, exactly as the
+    per-day scan used to; it qualifies at :data:`policy.RAIN_EPISODE_MM` of
+    rain that is neither missing nor stale, with a complete temperature
+    window whose mean sits inside
+    :data:`policy.RAIN_T_MEAN_MIN`..:data:`policy.RAIN_T_MEAN_MAX`.
+    """
+    best: WindowAggregate | None = None
+    for day in spell:
+        rain = calendar_window(rain_points, day, policy.RAIN_EPISODE_DAYS)
+        if rain.total is None or rain.total < policy.RAIN_EPISODE_MM:
+            continue
+        if rain.quality in {DataQuality.MISSING, DataQuality.STALE}:
+            continue
+        temperature = calendar_window(
+            temperature_points, day, policy.RAIN_EPISODE_DAYS
+        )
+        if not temperature.complete or temperature.mean is None:
+            continue
+        if not (
+            policy.RAIN_T_MEAN_MIN
+            <= temperature.mean
+            <= policy.RAIN_T_MEAN_MAX
+        ):
+            continue
+        if best is None or rain.total > best.total:
+            best = rain
+    return best
+
+
+def _episode_from_spell(
     location: str,
-    windows: Sequence[_QualifiedWindow],
+    spell: Sequence[date],
     rain_points: Mapping[date, float | SeriesPoint],
     temperature_points: Mapping[date, float | SeriesPoint],
 ) -> RainEpisode | None:
-    start = min(item.start for item in windows)
-    end = max(item.end for item in windows)
+    """Describe one qualifying spell over its own first..last wet day."""
+    if _qualifying_window(spell, rain_points, temperature_points) is None:
+        return None
+    start, end = spell[0], spell[-1]
     days = (end - start).days + 1
     rain = calendar_window(rain_points, end, days)
     temperature = calendar_window(temperature_points, end, days)
-    candidates = [
-        (day, value)
-        for day, raw in rain_points.items()
-        if start <= day <= end and (value := _value(raw)) is not None
-    ]
-    if not candidates or rain.total is None or temperature.mean is None:
+    if rain.total is None or temperature.mean is None:
         return None
-    anchor = max(candidates, key=lambda item: (item[1], item[0]))[0]
+    # Every day of a spell is wet, so ``or 0.0`` only pins the type down.
+    anchor = max(spell, key=lambda day: (_value(rain_points[day]) or 0.0, day))
     return RainEpisode(
         event_id=_event_id(location, start),
         location=location,
@@ -186,38 +273,14 @@ def detect_rain_episodes(
     temperature_points: Mapping[date, float | SeriesPoint],
     today: date,
 ) -> tuple[RainEpisode, ...]:
-    """Return all qualifying wet spells available in the supplied history."""
-    qualified: list[_QualifiedWindow] = []
-    for end in sorted(day for day in rain_points if day <= today):
-        rain = calendar_window(rain_points, end, policy.RAIN_EPISODE_DAYS)
-        temperature = calendar_window(
-            temperature_points, end, policy.RAIN_EPISODE_DAYS
-        )
-        if rain.total is None or rain.total < policy.RAIN_EPISODE_MM:
-            continue
-        if rain.quality in {DataQuality.MISSING, DataQuality.STALE}:
-            continue
-        if not temperature.complete or temperature.mean is None:
-            continue
-        if not (
-            policy.RAIN_T_MEAN_MIN
-            <= temperature.mean
-            <= policy.RAIN_T_MEAN_MAX
-        ):
-            continue
-        qualified.append(_QualifiedWindow(rain.start, rain.end))
+    """Return all qualifying wet spells available in the supplied history.
 
-    if not qualified:
-        return ()
-    groups: list[list[_QualifiedWindow]] = []
-    for window in qualified:
-        if not groups or window.start > groups[-1][-1].end + timedelta(days=1):
-            groups.append([window])
-        else:
-            groups[-1].append(window)
+    Consecutive wet days stay one episode; two rains a week apart stay two,
+    each with its own anchor and its own growth window.
+    """
     built = (
-        _episode_from_group(location, group, rain_points, temperature_points)
-        for group in groups
+        _episode_from_spell(location, spell, rain_points, temperature_points)
+        for spell in _wet_spells(rain_points, today)
     )
     return tuple(episode for episode in built if episode is not None)
 

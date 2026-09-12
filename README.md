@@ -180,9 +180,12 @@ failures are soft by design.
   maps, applied to every day as a correction of the place, x a lead-time
   damping; rounded to 5 % inside 5-95 %, capped at 50 % without a fresh
   station) and the conservative biological
-  verdict. All qualifying rain episodes are retained; overlapping rolling
-  windows from one wet spell are merged. An older active episode outranks a
-  newer waiting episode. D+7...D+12 is the primary window, D+13...D+21 is a
+  verdict. All qualifying rain episodes are retained: a rain episode is a run
+  of wet days (>= 1 mm), tolerating a single dry day inside it, that reaches
+  20 mm over some 3-day window at 12-22 °C; two dry days end it, so two rains
+  a week apart stay two episodes with two anchors. A day with no measurement
+  is neither wet nor dry and never splits a spell. An older active episode
+  outranks a newer waiting episode. D+7...D+12 is the primary window, D+13...D+21 is a
   residual phase capped at medium. Moisture before D+7 is also capped at
   medium. High additionally requires fresh API30 and forecast data, a valid
   temperature gate, sufficient history, no frost over the seven completed

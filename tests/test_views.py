@@ -477,6 +477,86 @@ def test_a_poor_map_lowers_the_forecast_days_too(tmp_path):
     assert bio["guidance"]["outlook"][1]["verdict"] == "high"
 
 
+def _rain_history(rain: dict[int, float]) -> list[Reading]:
+    """Station history at a steady 15 °C, with rain only on the named days."""
+    rows: list[Reading] = []
+    for offset in range(-35, 1):
+        day = TODAY + timedelta(days=offset)
+        rows += [
+            Reading(
+                "chmi_station", VALMEZ.slug, day, "sra_mm", rain.get(offset, 0.0)
+            ),
+            Reading("chmi_station", VALMEZ.slug, day, "t_mean", 15.0),
+        ]
+        if offset >= -7:
+            rows.append(Reading("chmi_station", VALMEZ.slug, day, "t_min", 8.0))
+    return rows
+
+
+def _flat_curve(mm: float, days: int = 12) -> list[Reading]:
+    return [
+        Reading(
+            "api30_forecast",
+            VALMEZ.slug,
+            TODAY + timedelta(days=offset),
+            "api30_mm",
+            mm,
+            meta={
+                "quality": "fresh",
+                **({"issued": TODAY.isoformat()} if offset else {}),
+            },
+        )
+        for offset in range(days)
+    ]
+
+
+def _flat_weather(days: int = 12) -> list[Reading]:
+    return [
+        Reading(
+            "openmeteo",
+            VALMEZ.slug,
+            TODAY + timedelta(days=offset),
+            metric,
+            value,
+            meta={"issued": TODAY.isoformat()} if offset else None,
+        )
+        for offset in range(days)
+        for metric, value in (("t_mean", 15.0), ("t_min", 8.0))
+    ]
+
+
+def _chance_of(tmp_path, rain: dict[int, float], name: str) -> dict:
+    with Store(tmp_path / f"{name}.sqlite") as store:
+        store.upsert_readings(_rain_history(rain), retrieved_at=stamp(5))
+        store.upsert_readings(_flat_weather(), retrieved_at=stamp(6))
+        store.upsert_readings(_flat_curve(28.0), retrieved_at=stamp(7))
+        return location_snapshot(store, VALMEZ, TODAY)["biological"]
+
+
+def test_a_second_rain_does_not_hide_an_open_growth_window(tmp_path):
+    """More rain must never mean a lower chance (the merging defect).
+
+    25 mm seven days ago put today inside D+7..D+12 and scored 65 %.  Adding
+    30 mm two days ago used to merge both rains into one episode anchored on
+    the newer one, which is still waiting: 10 %, for strictly more water.
+    """
+    one = _chance_of(tmp_path, {-7: 25.0}, "one")
+    two = _chance_of(tmp_path, {-7: 25.0, -2: 30.0}, "two")
+
+    assert one["chance"]["today"] == 65
+    assert two["chance"]["today"] == 65
+    assert len(one["rain_episodes"]) == 1
+    assert [item["date"] for item in two["rain_episodes"]] == [
+        TODAY - timedelta(days=7),
+        TODAY - timedelta(days=2),
+    ]
+    # the verdict reads the same two episodes: the open window dominates
+    assert two["guidance"]["phase"] == "primary_window"
+    assert one["guidance"]["dominant_event_id"] == two["guidance"][
+        "dominant_event_id"
+    ]
+
+
 def test_a_stale_station_caps_the_chance(tmp_path):
     api_curve = [
         Reading(

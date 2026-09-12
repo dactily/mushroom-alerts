@@ -91,6 +91,113 @@ def test_separated_rains_are_kept_as_distinct_episodes():
     assert episodes[0].event_id != episodes[1].event_id
 
 
+def test_a_newer_rain_does_not_swallow_the_older_open_window():
+    """The defect: five dry days between two rains merged them into one.
+
+    Rolling windows reach two days back, so the 3-day windows of a rain on
+    D-7 and of a rain on D-2 still touched and were grouped; the merged
+    episode anchored on the *newer* rain and today's open window vanished.
+    With 25 mm seven days ago the chance was 65 %, and adding 30 mm two days
+    ago dropped it to 10 %.
+    """
+    episodes = _episodes((-7, 25.0), (-2, 30.0))
+
+    assert len(episodes) == 2
+    assert [event.anchor for event in episodes] == [
+        TODAY - timedelta(days=7),
+        TODAY - timedelta(days=2),
+    ]
+    older, newer = episodes
+    assert older.primary_start <= TODAY <= older.primary_end
+    assert (older.start, older.end) == (older.anchor, older.anchor)
+    assert (newer.start, newer.end) == (newer.anchor, newer.anchor)
+
+
+def test_one_dry_day_does_not_split_a_wet_spell():
+    """A shower that pauses for a day is still one spell; a tie goes later."""
+    episodes = _episodes((-8, 12.0), (-6, 12.0))
+
+    assert len(episodes) == 1
+    assert (episodes[0].start, episodes[0].end) == (
+        TODAY - timedelta(days=8),
+        TODAY - timedelta(days=6),
+    )
+    assert episodes[0].anchor == TODAY - timedelta(days=6)
+    assert episodes[0].total_mm == 24.0
+
+
+def test_two_dry_days_end_a_wet_spell():
+    episodes = _episodes((-9, 22.0), (-6, 22.0))
+
+    assert [event.anchor for event in episodes] == [
+        TODAY - timedelta(days=9),
+        TODAY - timedelta(days=6),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("drizzle", "expected"),
+    [(policy.RAIN_WET_DAY_MM - 0.1, 2), (policy.RAIN_WET_DAY_MM, 1)],
+)
+def test_the_wet_day_threshold_decides_whether_a_gap_is_dry(drizzle, expected):
+    episodes = _episodes(
+        (-9, 22.0), (-8, drizzle), (-7, drizzle), (-6, 22.0)
+    )
+
+    assert len(episodes) == expected
+
+
+def test_unknown_days_neither_split_a_spell_nor_extend_it():
+    """A hole in the series is not evidence that the ground stayed dry."""
+    start = TODAY - timedelta(days=35)
+    rain: dict[date, float | SeriesPoint] = _series(
+        start,
+        TODAY,
+        {TODAY - timedelta(days=9): 22.0, TODAY - timedelta(days=6): 4.0},
+    )
+    for offset in (8, 7, 5):  # two inside the spell, one just after it
+        gap = TODAY - timedelta(days=offset)
+        rain[gap] = SeriesPoint(gap, None, "chmi_station", DataQuality.MISSING)
+    temperature = {day: 15.0 for day in _series(start, TODAY, {})}
+
+    episodes = biology.detect_rain_episodes("forest", rain, temperature, TODAY)
+
+    assert len(episodes) == 1  # two dry days would have split it
+    assert (episodes[0].start, episodes[0].end) == (
+        TODAY - timedelta(days=9),
+        TODAY - timedelta(days=6),
+    )
+    # ...and the hole is reported rather than hidden
+    assert (episodes[0].covered_days, episodes[0].expected_days) == (2, 4)
+    assert episodes[0].lower_bound is True
+
+
+def test_the_reported_span_describes_the_wet_days_not_the_window():
+    (episode,) = _episodes((-8, 8.0), (-7, 15.0), (-6, 4.0))
+
+    assert (episode.start, episode.end) == (
+        TODAY - timedelta(days=8),
+        TODAY - timedelta(days=6),
+    )
+    assert episode.total_mm == 27.0
+    assert (episode.covered_days, episode.expected_days) == (3, 3)
+    assert episode.temperature_mean_c == 15.0
+    assert episode.temperature_covered_days == 3
+    assert episode.lower_bound is False
+
+
+def test_the_event_id_follows_the_first_wet_day():
+    """Ids shift for spells whose start moved -- worth one extra send."""
+    (plain,) = _episodes((-7, 25.0))
+    (after_drizzle,) = _episodes((-8, 0.5), (-7, 25.0))
+    (after_rain,) = _episodes((-8, 2.0), (-7, 25.0))
+
+    assert plain.start == after_drizzle.start  # 0.5 mm is a dry day
+    assert plain.event_id == after_drizzle.event_id
+    assert after_rain.start == TODAY - timedelta(days=8)
+    assert after_rain.event_id != plain.event_id
+
+
 @pytest.mark.parametrize(
     ("day_offset", "phase", "verdict"),
     [
