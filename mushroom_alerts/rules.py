@@ -20,9 +20,12 @@ Triggers (PLAN §3, one per location, any of them fires exit ``10``)
     Mushrooms follow the rain by roughly a week, so the message names the
     window ``rain + 7 .. rain + 12`` days.
 ``rain_window``
-    The second half of the same story: today falls inside a window
-    announced earlier and the station's API30 is still at/above the
-    threshold, i.e. the ground really did stay wet.
+    The second half of the same story: today falls inside the dominant
+    primary window derived from all stored rain episodes and the station's
+    API30 is still at/above the threshold, i.e. the ground really did stay
+    wet. A newer rain still in its waiting phase cannot hide an older active
+    window: episodes are split on dry gaps (``biology._wet_spells``), so the
+    two rains stay two episodes and the older one keeps its own anchor.
 ``api30_cross``
     The forecast API30 curve crosses the threshold upward on some day *D*
     ahead (today is still below it), and Open-Meteo's temperature on *D*
@@ -325,13 +328,13 @@ def rain_window_signal(
 ) -> Signal | None:
     """PLAN §3 trigger 3, second half: the announced window has arrived.
 
-    ``episode`` is the ``data`` blob of the earlier ``rain_forecast``
-    emission; the window only counts if the ground is still wet, i.e.
-    the station's API30 is at or above the threshold.
+    ``episode`` comes from the shared biological view. The window only counts
+    if the ground is still wet, i.e. the station's API30 is at or above the
+    threshold.
     """
     if not episode or api30_now is None or api30_now < threshold:
         return None
-    raw = episode.get("window") or []
+    raw = episode.get("window") or episode.get("growth_window") or []
     if len(raw) != 2:
         return None
     try:
@@ -342,9 +345,10 @@ def rain_window_signal(
     if not start <= today <= end:
         return None
     anchor = ""
-    if episode.get("anchor"):
+    raw_anchor = episode.get("anchor") or episode.get("date")
+    if raw_anchor:
         try:
-            anchor = f" после дождя {_d(date.fromisoformat(str(episode['anchor'])))}"
+            anchor = f" после дождя {_d(date.fromisoformat(str(raw_anchor)))}"
         except ValueError:
             anchor = ""
     return Signal(
@@ -353,8 +357,9 @@ def rain_window_signal(
             f"окно роста{anchor} началось ({_d(start)}–{_d(end)}), "
             f"API30 {_mm(api30_now)} ≥ {_mm(threshold)}"
         ),
-        key=start.isoformat(),
+        key=str(episode.get("event_id") or start.isoformat()),
         data={
+            "event_id": episode.get("event_id"),
             "window": [start.isoformat(), end.isoformat()],
             "api30_mm": round(api30_now, 1),
             "threshold_mm": threshold,
@@ -579,6 +584,10 @@ def format_line(
     """
     facts = _facts(snap)
     extras: list[str] = []
+    guidance = ((snap.get("biological") or {}).get("guidance") or {})
+    verdict = guidance.get("verdict_label")
+    if verdict:
+        extras.append(f"вердикт {verdict}")
     if signals:
         # The ČHMÚ / HoubyMapa triggers describe the same numbers the facts
         # already carry, only with the arrow and the label -- so let the
@@ -613,8 +622,13 @@ def describe(store: Store, location: Location, today: date) -> str:
 # ----------------------------------------------------------------------
 # antispam / emission bookkeeping
 # ----------------------------------------------------------------------
-def _last_note(store: Store, slug: str, trigger: str) -> tuple[date, dict[str, Any]] | None:
-    row = store.last_emission(slug, trigger)
+def _last_note(
+    store: Store,
+    slug: str,
+    trigger: str,
+    emission_key: str | None = None,
+) -> tuple[date, dict[str, Any]] | None:
+    row = store.last_emission(slug, trigger, emission_key)
     if row is None:
         return None
     try:
@@ -632,7 +646,12 @@ def _last_note(store: Store, slug: str, trigger: str) -> tuple[date, dict[str, A
 
 def _allowed(store: Store, slug: str, signal: Signal, today: date) -> bool:
     """Antispam gate.  See the module docstring; deliberately small."""
-    last = _last_note(store, slug, signal.trigger)
+    last = _last_note(
+        store,
+        slug,
+        signal.trigger,
+        None if signal.trigger == T_API30_CROSS else signal.key,
+    )
     if last is None:
         return True
     day, payload = last
@@ -648,13 +667,13 @@ def _allowed(store: Store, slug: str, signal: Signal, today: date) -> bool:
             return True
         current = date.fromisoformat(signal.data["cross"])
         return abs((current - previous).days) > CROSS_SHIFT_DAYS
-    if payload.get("key") == signal.key and (today - day).days <= signal.cooldown:
+    if (today - day).days <= signal.cooldown:
         return False
     return True
 
 
 def _record(store: Store, slug: str, signal: Signal, today: date) -> None:
-    last = _last_note(store, slug, signal.trigger)
+    last = _last_note(store, slug, signal.trigger, signal.key)
     if last is not None and last[0] == today and last[1].get("key") == signal.key:
         return  # already logged today -- do not duplicate the row
     payload = json.dumps(
@@ -730,6 +749,8 @@ def _signals_for(
     t_mean = series.get("t_mean") or {}
     station_quality = station.get("quality")
     station_usable = station_quality not in {DataQuality.STALE.value, DataQuality.MISSING.value}
+    biological = snap.get("biological") or {}
+    episodes = biological.get("rain_episodes") or []
     if sra and station_usable:
         signal = rain_signal(
             series_points.get("sra_mm") or sra,
@@ -737,13 +758,48 @@ def _signals_for(
             today,
         )
         if signal is not None:
+            try:
+                anchor = date.fromisoformat(str(signal.data["anchor"]))
+            except (KeyError, ValueError):
+                anchor = None
+            event = next(
+                (
+                    item
+                    for item in episodes
+                    if anchor is not None
+                    and item.get("start") <= anchor <= item.get("end")
+                ),
+                None,
+            )
+            if event is not None and event.get("event_id"):
+                data = dict(signal.data, event_id=event["event_id"])
+                signal = Signal(
+                    signal.trigger,
+                    signal.text,
+                    str(event["event_id"]),
+                    data,
+                    signal.cooldown,
+                )
             signals.append(signal)
-    episode = _last_note(store, slug, T_RAIN_FORECAST)
-    if episode is not None and station_usable:
+    guidance = biological.get("guidance") or {}
+    dominant_event_id = guidance.get("dominant_event_id")
+    episode = next(
+        (
+            item
+            for item in episodes
+            if item.get("event_id") == dominant_event_id
+        ),
+        None,
+    )
+    if (
+        episode is not None
+        and guidance.get("phase") == "primary_window"
+        and station_usable
+    ):
         api_now = station.get("api30_mm")
         if api_now is None and sra:
             api_now = api30_lib.api30(sra, today)
-        signal = rain_window_signal(episode[1].get("data"), api_now, threshold, today)
+        signal = rain_window_signal(episode, api_now, threshold, today)
         if signal is not None:
             signals.append(signal)
 

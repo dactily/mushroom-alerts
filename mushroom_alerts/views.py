@@ -8,6 +8,8 @@ from typing import Any, Iterable, Sequence
 from zoneinfo import ZoneInfo
 
 from . import api30 as api30_lib
+from . import biology
+from . import chance as chance_lib
 from . import policy
 from .base import DataQuality, FetchResult, Location, Reading
 from .fetch_chmi_map import LEVEL_LABELS
@@ -129,44 +131,77 @@ def _input_openmeteo_run(store: Store, api_run: Any, slug: str) -> Any:
     return None
 
 
+def _quality_of(value: Any) -> DataQuality:
+    """A stored ``quality`` string as an enum; anything unknown is missing."""
+    try:
+        return value if isinstance(value, DataQuality) else DataQuality(str(value))
+    except ValueError:
+        return DataQuality.MISSING
+
+
+def _chance_moisture(
+    forecast: dict[str, Any],
+    station: dict[str, Any] | None,
+    station_status: dict[str, Any],
+    today: date,
+) -> tuple[dict[date, float], dict[date, DataQuality]]:
+    """The API30 the chance may use, per day, with an honest quality.
+
+    Two corrections to what ``api30_quality_by_date`` says on its own:
+
+    * a point's quality describes the value *inside* its release and says
+      nothing about the age of the release, so a three-day-old run used to
+      hand the chance a curve of ``fresh`` days.  Every day is therefore
+      capped by ``api30_run_quality``: a stale release makes its days
+      unusable, and without a number the chance reports none at all;
+    * that alone would blind today as well, even though the station measured
+      its own API30 this morning.  So **today only** falls back to the
+      station's latest API30 with the station's own quality, whenever the
+      derived curve for today is unusable and the station value is fresh or
+      partial.  A forecast release going stale then costs the forecast days,
+      not the day we actually have a measurement for.
+    """
+    curve = dict(forecast.get("curve") or [])
+    run_quality = _quality_of(forecast.get("api30_run_quality"))
+    qualities = {
+        day: quality_worst(_quality_of(value), run_quality)
+        for day, value in (forecast.get("api30_quality_by_date") or {}).items()
+    }
+    for day in curve:  # a value nobody described is a value nobody may use
+        qualities.setdefault(day, DataQuality.MISSING)
+
+    usable = {DataQuality.FRESH, DataQuality.PARTIAL}
+    station_value = (station or {}).get("api30_mm")
+    station_quality = _quality_of(station_status.get("quality"))
+    if (
+        qualities.get(today) not in usable
+        and station_value is not None
+        and station_quality in usable
+    ):
+        curve[today] = float(station_value)
+        qualities[today] = station_quality
+    return curve, qualities
+
+
 def _biological_features(
     store: Store,
     slug: str,
     today: date,
     sra_points: dict[date, Any],
     t_points: dict[date, Any],
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], tuple[biology.RainEpisode, ...]]:
     temperature = calendar_window(t_points, today, 7)
+    frost_end = today - timedelta(days=1)
     t_min_rows = store.series(
-        STATION, slug, "t_min", since=today - timedelta(days=6), until=today
+        STATION,
+        slug,
+        "t_min",
+        since=frost_end - timedelta(days=6),
+        until=frost_end,
     )
     frost_row = min(t_min_rows, key=lambda row: float(row.value)) if t_min_rows else None
 
-    rain_episode = None
-    for end in sorted(sra_points, reverse=True):
-        if end > today:
-            continue
-        aggregate = calendar_window(sra_points, end, policy.RAIN_EPISODE_DAYS)
-        if aggregate.total is None or aggregate.total < policy.RAIN_EPISODE_MM:
-            continue
-        first = end - timedelta(days=policy.RAIN_EPISODE_DAYS - 1)
-        episode_days = [day for day in sra_points if first <= day <= end]
-        if not episode_days:
-            continue
-        anchor = max(episode_days, key=lambda day: float(sra_points[day].value))
-        rain_episode = {
-            "date": anchor,
-            "total_mm": round(aggregate.total, 1),
-            "covered_days": aggregate.covered_days,
-            "expected_days": aggregate.expected_days,
-            "quality": aggregate.quality.value,
-            "lower_bound": aggregate.lower_bound,
-            "growth_window": [
-                anchor + timedelta(days=policy.GROWTH_WINDOW_FROM_DAYS),
-                anchor + timedelta(days=policy.GROWTH_WINDOW_TO_DAYS),
-            ],
-        }
-        break
+    episodes = biology.detect_rain_episodes(slug, sra_points, t_points, today)
 
     api_rows = store.series(
         STATION, slug, "api30_mm", since=today - timedelta(days=7), until=today
@@ -195,10 +230,13 @@ def _biological_features(
             "present": frost_row is not None and float(frost_row.value) <= 0.0,
             "date": None if frost_row is None else frost_row.date,
             "minimum_c": None if frost_row is None else float(frost_row.value),
+            "start": frost_end - timedelta(days=6),
+            "end": frost_end,
             "covered_days": len(t_min_rows),
             "expected_days": 7,
         },
-        "rain_episode": rain_episode,
+        "rain_episode": None if not episodes else episodes[-1].as_dict(),
+        "rain_episodes": [episode.as_dict() for episode in episodes],
         "api30_dynamics": {
             "date": latest_day,
             "value_mm": latest,
@@ -215,7 +253,7 @@ def _biological_features(
                 and history.quality not in {DataQuality.MISSING, DataQuality.STALE}
             ),
         },
-    }
+    }, episodes
 
 
 def forecast_bundle(
@@ -248,7 +286,8 @@ def forecast_bundle(
     )
     api_point_qualities = _point_qualities(store, api_run_id, slug)
     api_today_quality = api_point_qualities.get(today, DataQuality.MISSING)
-    api_quality = quality_worst(_run_quality(api_run, today), api_today_quality)
+    api_run_quality = _run_quality(api_run, today)
+    api_quality = quality_worst(api_run_quality, api_today_quality)
     open_quality = _run_quality(open_run, today)
     qualities = (open_quality, api_quality)
     quality = quality_worst(*qualities)
@@ -256,6 +295,10 @@ def forecast_bundle(
         "quality": quality.value,
         "openmeteo_quality": qualities[0].value,
         "api30_quality": qualities[1].value,
+        # Two different things, and a caller that needs to judge a day needs
+        # both: the point quality says what that day's value is worth inside
+        # the release, ``api30_run_quality`` says how old the release is.
+        "api30_run_quality": api_run_quality.value,
         "api30_quality_by_date": {
             day: point_quality.value for day, point_quality in api_point_qualities.items()
         },
@@ -379,11 +422,91 @@ def location_snapshot(
     if forecast["openmeteo_run_id"] or forecast["api30_run_id"]:
         out["forecast"] = forecast
     _apply_run_status(out["source_status"], results, slug)
-    biological = _biological_features(store, slug, today, sra_points, t_points)
+    biological, episodes = _biological_features(
+        store, slug, today, sra_points, t_points
+    )
     biological["rules_version"] = policy.RULES_VERSION
     biological["input_quality"] = {
         source: status.get("quality", DataQuality.MISSING.value)
         for source, status in out["source_status"].items()
     }
+
+    def fresh_map(block: dict[str, Any] | None, source: str) -> bool:
+        status = out["source_status"].get(source) or {}
+        return bool(
+            block
+            and block.get("level") is not None
+            and status.get("quality") == DataQuality.FRESH.value
+        )
+
+    map_high = any(
+        fresh_map(block, source)
+        and float(block["level"]) >= policy.BIOLOGICAL_MAP_LEVEL
+        for block, source in ((out["chmi"], CHMI_MAP), (out["houbymapa"], HOUBYMAPA))
+    )
+    api_curve = dict(forecast.get("curve") or [])
+    api_qualities = forecast.get("api30_quality_by_date") or {}
+    frost = biological.get("frost") or {}
+    history = biological.get("history") or {}
+    assessment = biology.assess_horizon(
+        today,
+        episodes,
+        list(api_curve),
+        api30=api_curve,
+        api30_quality=api_qualities,
+        t_mean=forecast.get("t_mean") or {},
+        t_min=forecast.get("t_min") or {},
+        forecast_fresh=(
+            out["source_status"][OPENMETEO]["quality"] == DataQuality.FRESH.value
+        ),
+        history_sufficient=bool(history.get("sufficient")),
+        frost_known=frost.get("covered_days", 0) >= frost.get("expected_days", 7),
+        frost_present=bool(frost.get("present")),
+        map_high=map_high,
+        usable_input=(
+            fresh_map(out["chmi"], CHMI_MAP)
+            or fresh_map(out["houbymapa"], HOUBYMAPA)
+            or api_qualities.get(today) == DataQuality.FRESH.value
+        ),
+        threshold_mm=float(forecast.get("threshold_mm", policy.API30_THRESHOLD_MM)),
+    )
+    biological["guidance"] = assessment.as_dict()
+    chance_api30, chance_qualities = _chance_moisture(
+        forecast, out["station"], out["source_status"][STATION], today
+    )
+    biological["chance"] = chance_lib.assess_chance_horizon(
+        today,
+        # The chance ramps over the days since a rain instead of reading the
+        # phase word, so it needs the anchors, not the verdict's categories.
+        [episode.anchor for episode in episodes],
+        list(api_curve),
+        api30=chance_api30,
+        api30_quality=chance_qualities,
+        t_mean=forecast.get("t_mean") or {},
+        t_min=forecast.get("t_min") or {},
+        frost_present=bool(frost.get("present")),
+        # A stale map is no support: pass the level only while it is fresh,
+        # exactly as the verdict's map gate reads it.
+        chmi_level=(
+            float(out["chmi"]["level"]) if fresh_map(out["chmi"], CHMI_MAP) else None
+        ),
+        houbymapa_score=(
+            float(out["houbymapa"]["score"])
+            if (out["houbymapa"] or {}).get("score") is not None
+            and out["source_status"][HOUBYMAPA]["quality"] == DataQuality.FRESH.value
+            else None
+        ),
+        station_available=out["source_status"][STATION]["quality"]
+        in {DataQuality.FRESH.value, DataQuality.PARTIAL.value},
+    ).as_dict()
+    dominant_id = assessment.current.dominant_event_id
+    biological["rain_episode"] = next(
+        (
+            episode.as_dict()
+            for episode in episodes
+            if episode.event_id == dominant_id
+        ),
+        None,
+    )
     out["biological"] = biological
     return out

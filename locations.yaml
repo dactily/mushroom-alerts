@@ -1,10 +1,13 @@
-# Locations watched by mushroom-alerts. Name + coordinates only;
-# everything derived (CHMU pixel, HoubyMapa cell, nearest stations)
-# is cached in state.sqlite. Edit via `python -m mushroom_alerts add/del`.
+# Locations watched by mushroom-alerts. Name + coordinates, plus an
+# optional `short` name for the message; everything derived (CHMU pixel,
+# HoubyMapa cell, nearest stations) is cached in state.sqlite. The order
+# of this file is the order of the report. Edit via `add`/`del`.
 - name: Valašské Meziříčí
   slug: valmez
+  short: Valmez
   lat: 49.4718
   lon: 17.9711
 - name: Valašská Bystřice
+  short: Bystřice
   lat: 49.416
   lon: 18.106

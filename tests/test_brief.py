@@ -9,6 +9,7 @@ brief has to survive both (PLAN §6).
 from __future__ import annotations
 
 import json
+import re
 import sys
 import types
 from datetime import date, timedelta
@@ -157,7 +158,11 @@ def test_render_has_every_section(tmp_path):
     assert "температура за" in text and "средняя" in text
     assert "температура почвы: 5 см 17.6 °C, 10 см 17.7 °C" in text
     assert "влажность: 81 %" in text
-    assert "биологические признаки (без автоматического вердикта):" in text
+    assert "биологическая оценка (детерминированная):" in text
+    assert "вердикт сегодня: средняя (rules v6)" in text
+    assert "шанс сегодня: 45 %" in text
+    assert "не подтверждение отдельных плодовых тел" in text
+    assert "возможная высокая вероятность:" in text
     assert "T средняя 7 д:" in text and "динамика API30:" in text
 
     # history table: one line per day, 14 of them
@@ -167,6 +172,7 @@ def test_render_has_every_section(tmp_path):
 
     # forecast table plus the derived API30 curve
     assert "прогноз, сегодня + 16 дн." in text
+    assert "API30 мм | оценка" in text
     assert (TODAY + timedelta(days=15)).isoformat() in text
     cross = (TODAY + timedelta(days=4)).isoformat()
     assert f"порог API30 25 мм: пересечение {cross} (через 4 дн.)" in text
@@ -250,7 +256,7 @@ def test_brief_stays_compact(tmp_path):
         payload = brief_lib.build(store, [VALMEZ], TODAY)
     text = brief_lib.render(payload)
     body = text.split("Как читать")[0]
-    assert len(body.encode("utf-8")) < 4000, len(body.encode("utf-8"))
+    assert len(body.encode("utf-8")) < 4500, len(body.encode("utf-8"))
 
 
 # ----------------------------------------------------------------------
@@ -425,3 +431,174 @@ def test_cli_brief_is_idempotent(monkeypatch, capsys):
         ).fetchone()["c"]
     assert rows > 0
     assert sys.modules.get("mushroom_alerts.rules") is not None
+
+
+# ----------------------------------------------------------------------
+# ``brief --mode``: the short block the cron jobs actually print
+# ----------------------------------------------------------------------
+def test_cli_brief_mode_daily_prints_the_block_and_records_it(monkeypatch, capsys):
+    full_stack(monkeypatch)
+    assert cli.main(["brief", "--mode", "daily"]) == 0
+    out = capsys.readouterr().out
+    assert out.startswith("ОТПРАВЛЯТЬ: да\n")
+    assert "ПРИЧИНА: первый запуск" in out
+    assert "ЗАГОЛОВОК: 🍄 Грибной прогноз: " in out
+    assert "ШАНС на " in out and "ФАЗА:" in out and "ОГОВОРКИ:" in out
+    # only valmez has readings in these fixtures, so only valmez has a number
+    assert "ПОДРОБНО (1 локация с лучшим шансом):" in out
+    assert "ОГОВОРКИ: нет свежего API30: Bystřice" in out
+    # both locations are listed, in the order of locations.yaml
+    assert out.index("Valmez — ") < out.index("Bystřice — ")
+    assert re.search(r"Valmez — \d+ %", out)
+    assert "Bystřice — нет данных" in out
+    # no tables, no cheat sheet, no ISO dates
+    assert "история 14 дн." not in out and "Как читать" not in out
+    assert TODAY.isoformat() not in out
+    assert len(out.encode("utf-8")) <= 1536, len(out.encode("utf-8"))
+    with Store() as store:
+        row = store.last_report("daily")
+    assert row["mode"] == "daily" and row["sent"] == 1
+
+
+def test_cli_brief_mode_weekend_always_sends(monkeypatch, capsys):
+    full_stack(monkeypatch)
+    assert cli.main(["brief", "--mode", "weekend"]) == 0
+    out = capsys.readouterr().out
+    assert out.startswith("ОТПРАВЛЯТЬ: да\n")
+    assert "ПРИЧИНА: плановый прогноз на выходные" in out
+    assert "Грибной прогноз на выходные " in out
+
+
+def test_cli_brief_mode_is_idempotent_on_the_same_day(monkeypatch, capsys):
+    full_stack(monkeypatch)
+    cli.main(["brief", "--mode", "daily"])
+    first = capsys.readouterr().out
+    cli.main(["brief", "--mode", "daily"])
+    assert capsys.readouterr().out == first
+    with Store() as store:
+        rows = store.conn.execute("SELECT COUNT(*) c FROM reports").fetchone()["c"]
+    assert rows == 1
+
+
+def test_cli_brief_mode_stays_silent_when_nothing_moved(monkeypatch, capsys):
+    """A report from an earlier date, identical to today, means [SILENT]."""
+    full_stack(monkeypatch)
+    assert cli.main(["brief", "--mode", "daily"]) == 0
+    capsys.readouterr()
+    with Store() as store:
+        row = store.last_report("daily")
+        store.save_report(
+            TODAY - timedelta(days=1),
+            "daily",
+            chances=json.loads(row["chances_json"]),
+            verdicts=json.loads(row["verdicts_json"]),
+            candidates=json.loads(row["candidates_json"]),
+            events=json.loads(row["events_json"]),
+            error_class=row["error_class"],
+            rules_version=row["rules_version"],
+            sent=True,
+            reason="вчера",
+        )
+    assert cli.main(["brief", "--mode", "daily"]) == 0
+    out = capsys.readouterr().out
+    assert out.startswith("ОТПРАВЛЯТЬ: нет\n")
+    assert "ПРИЧИНА: ничего не изменилось с прошлого отчёта" in out
+
+
+def test_cli_brief_mode_json(monkeypatch, capsys):
+    full_stack(monkeypatch)
+    assert cli.main(["brief", "--mode", "daily", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["mode"] == "daily" and payload["send"] is True
+    assert payload["exit_code"] == 0
+    assert payload["date"] == TODAY.isoformat()
+    assert {loc["slug"] for loc in payload["locations"]} == {"valmez", "valasska-bystrice"}
+    assert payload["text"].startswith("ОТПРАВЛЯТЬ: да")
+
+
+def test_cli_brief_mode_reports_a_total_blackout(monkeypatch, capsys):
+    use_fetchers(monkeypatch, [fake_module("chmi_map", ok=False, error="boom")])
+    assert cli.main(["brief", "--mode", "weekend"]) == 1
+    out = capsys.readouterr().out
+    assert out.startswith("ОТПРАВЛЯТЬ: да\n")
+    assert "бриф не собрался" in out
+    assert "ШАНС: данных нет, прогноз не собрался" in out
+
+
+# ----------------------------------------------------------------------
+# ``brief --location``: twenty locations must not print 60 KB (PLAN §9f)
+# ----------------------------------------------------------------------
+def test_cli_brief_location_filter_prints_only_that_location(monkeypatch, capsys):
+    full_stack(monkeypatch)
+    assert cli.main(["brief"]) == 0
+    whole = capsys.readouterr().out
+
+    assert cli.main(["brief", "--location", "valmez"]) == 0
+    out = capsys.readouterr().out
+    assert "🍄 Valašské Meziříčí" in out
+    assert "Valašská Bystřice" not in out
+    assert len(out) < len(whole)
+
+
+def test_cli_brief_location_filter_keeps_the_config_order(monkeypatch, capsys):
+    """The flags may come in any order; the output order is the file's."""
+    full_stack(monkeypatch)
+    assert (
+        cli.main(
+            ["brief", "--location", "Valašská Bystřice", "--location", "valmez"]
+        )
+        == 0
+    )
+    out = capsys.readouterr().out
+    assert out.index("🍄 Valašské Meziříčí") < out.index("🍄 Valašská Bystřice")
+
+
+def test_cli_brief_location_filter_works_with_mode_but_records_nothing(
+    monkeypatch, capsys
+):
+    """A partial block must not become the state tomorrow compares against."""
+    full_stack(monkeypatch)
+    assert cli.main(["brief", "--mode", "daily", "--location", "valmez"]) == 0
+    out = capsys.readouterr().out
+    assert "Valmez — " in out and "Bystřice — " not in out
+    with Store() as store:
+        assert store.last_report("daily") is None
+
+    # unfiltered, the same day does record
+    assert cli.main(["brief", "--mode", "daily"]) == 0
+    capsys.readouterr()
+    with Store() as store:
+        assert store.last_report("daily") is not None
+
+
+def test_cli_brief_rejects_an_unknown_location(monkeypatch, capsys):
+    full_stack(monkeypatch)
+    assert cli.main(["brief", "--location", "Brno"]) == 1
+    assert "no such location: Brno" in capsys.readouterr().err
+
+
+def test_cli_brief_mode_keeps_the_yaml_order_end_to_end(monkeypatch, capsys, tmp_path):
+    """yaml -> fetch -> store -> brief -> block: nothing re-sorts on the way."""
+    path = tmp_path / "many.yaml"
+    path.write_text(
+        "- {name: Valašské Meziříčí, slug: valmez, short: Valmez, lat: 49.4718, lon: 17.9711}\n"
+        "- {name: Bystřice pod Hostýnem, lat: 49.3994, lon: 17.6742}\n"
+        "- {name: Rajnochovice, lat: 49.4083, lon: 17.8}\n"
+        "- {name: Kateřinice, lat: 49.5346, lon: 18.0669}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("MUSHROOM_LOCATIONS", str(path))
+    full_stack(monkeypatch)
+    assert cli.main(["brief", "--mode", "daily"]) == 0
+    out = capsys.readouterr().out
+    listed = [
+        line.strip().split(" — ")[0]
+        for line in out.splitlines()
+        if line.startswith("  ") and " — " in line
+    ]
+    assert listed == [
+        "Valmez",
+        "Bystřice pod Hostýnem",
+        "Rajnochovice",
+        "Kateřinice",
+    ]

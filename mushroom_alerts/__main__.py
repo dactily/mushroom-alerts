@@ -13,10 +13,14 @@ the other sources carry on (PLAN §6).
 renders the result, and records only signals emitted to stdout.
 
 ``brief`` runs the very same pipeline (:func:`run_pipeline` + :func:`_decide`)
-and then prints the facts at length instead of collapsing them: it is what
-Hermes Agent reads and interprets (PLAN §2b, ``mushroom_alerts/brief.py``,
-``hermes/PROMPT.md``). It exits ``1`` when every source failed or rule
-calculation failed; partial results remain exit ``0``.
+and then prints the facts at length instead of collapsing them: the debugging
+view (PLAN §2b, ``mushroom_alerts/brief.py``). With ``--mode daily|weekend``
+it prints instead the short ready-to-send block from ``report.py``, including
+the send/silent flag computed against the stored previous report -- that is
+what Hermes reads and only re-words (``hermes/PROMPT.md``). It exits ``1``
+when every source failed or rule calculation failed; partial results remain
+exit ``0``.  ``--location SLUG`` (repeatable) narrows either view to a few
+locations; being partial, such a run never records the report row.
 
 ``status`` never fetches: it renders the shared location view from SQLite.
 """
@@ -47,10 +51,12 @@ from .base import (
 from .http import Http
 from .locations import (
     add_location,
+    find_location,
     load_locations,
     locations_path,
     remove_location,
 )
+from . import report as report_lib
 from . import rules as rules_lib
 from .store import Store
 
@@ -280,8 +286,38 @@ def cmd_check(args: argparse.Namespace) -> int:
         return decision.exit_code
 
 
+def select_locations(
+    locations: list[Location], wanted: Sequence[str]
+) -> tuple[list[Location], list[str]]:
+    """``--location`` filter, in the order of ``locations.yaml``.
+
+    Twenty locations are ~60 KB of debugging tables, so the debug brief
+    needs a way to look at two of them.  The order of the file survives the
+    filter: the flags may come in any order, the output does not change.
+    """
+    chosen: set[str] = set()
+    missing: list[str] = []
+    for needle in wanted:
+        found = find_location(locations, needle)
+        if found is None:
+            missing.append(needle)
+        else:
+            chosen.add(found.slug)
+    return [loc for loc in locations if loc.slug in chosen], missing
+
+
 def cmd_brief(args: argparse.Namespace) -> int:
     """The Hermes brief: same pipeline as ``check``, facts instead of a verdict.
+
+    Without ``--mode`` this is the full debugging view with both tables.
+    With ``--mode`` it is the short human block plus the send decision, and
+    the run is recorded in ``reports`` so tomorrow can compare against it.
+
+    ``--location`` narrows the run to the named locations (repeatable, slug
+    or name).  It is a debugging flag: the block it prints covers a subset,
+    so with ``--mode`` the decision is still computed but **not** stored --
+    a partial row would make tomorrow's comparison lie about the locations
+    left out.
 
     Exit code is always ``0`` -- the brief is meant to be read, not keyed
     off -- except when *every* source failed, which is exit ``1`` like
@@ -295,6 +331,12 @@ def cmd_brief(args: argparse.Namespace) -> int:
     if not locations:
         print(f"no locations configured ({locations_path()})", file=sys.stderr)
         return EXIT_ERROR
+    wanted = list(getattr(args, "location", None) or [])
+    if wanted:
+        locations, missing = select_locations(locations, wanted)
+        if missing:
+            print(f"no such location: {', '.join(missing)}", file=sys.stderr)
+            return EXIT_ERROR
 
     with Http() as http, Store() as store:
         run = run_pipeline(locations, store=store, http=http, today=today)
@@ -323,7 +365,37 @@ def cmd_brief(args: argparse.Namespace) -> int:
             results=run.results,
         )
 
-    exit_code = EXIT_ERROR if run.all_failed or calculation_error else EXIT_SILENT
+        exit_code = EXIT_ERROR if run.all_failed or calculation_error else EXIT_SILENT
+        mode = getattr(args, "mode", None)
+        if mode:
+            summary = report_lib.summarize(
+                payload,
+                mode=mode,
+                today=today,
+                calculation_error=calculation_error,
+                all_failed=run.all_failed,
+            )
+            # A filtered run is a debugging view of a subset: decide, but
+            # never overwrite the day's state with a partial report.
+            if wanted:
+                send, reason = report_lib.decide(store, summary)
+            else:
+                send, reason = report_lib.publish(store, summary)
+            if args.json:
+                print(
+                    jsonlib.dumps(
+                        dict(
+                            report_lib.to_json(summary, send=send, reason=reason),
+                            exit_code=exit_code,
+                        ),
+                        ensure_ascii=False,
+                        indent=2,
+                    )
+                )
+            else:
+                print(report_lib.render(summary, send=send, reason=reason), end="")
+            return exit_code
+
     if args.json:
         payload = dict(
             brief_lib.to_json(payload),
@@ -479,6 +551,18 @@ def build_parser() -> argparse.ArgumentParser:
         default=16,
         metavar="N",
         help="forecast horizon in days (default 16, Open-Meteo's maximum)",
+    )
+    p_brief.add_argument(
+        "--mode",
+        choices=report_lib.MODES,
+        help="print the short ready-to-send report block instead of the tables",
+    )
+    p_brief.add_argument(
+        "--location",
+        action="append",
+        metavar="SLUG",
+        help="only this location (repeatable; slug or name). Debugging filter: "
+        "with --mode the decision is printed but not recorded",
     )
     p_brief.set_defaults(func=cmd_brief)
 
