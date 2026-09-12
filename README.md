@@ -45,10 +45,10 @@ Typical output:
 
 ```
 $ python -m mushroom_alerts status
-🍄 Valašské Meziříčí: ČHMÚ 3/5, HoubyMapa 3/5 (0.47), станция API30 20 mm, SRA 3d 0.2 mm, T 14.2 °C · прогноз: API30 сегодня 19 mm, max 35 mm 23.9., дождь 9.8 mm 10.9., порог 25 mm пройден 22.9.
+🍄 Valašské Meziříčí: ČHMÚ 3/5, HoubyMapa 3/5 (0.47), станция API30 20 mm, SRA 3d 0.2 mm, T 14.2 °C · вердикт средняя · прогноз: API30 сегодня 19 mm, max 35 mm 23.9., дождь 9.8 mm 10.9., порог 25 mm пройден 22.9.
 
 $ python -m mushroom_alerts check; echo $?
-🍄 Valašské Meziříčí: ČHMÚ 3/5, HoubyMapa 3/5 (0.47), станция API30 20 mm, SRA 3d 0.2 mm, T 14.2 °C · прогноз: API30 ≥ 25 mm с 22.9. (пик 35 mm 23.9., дождь 10 mm 22.9.) — ориентировочно
+🍄 Valašské Meziříčí: ČHMÚ 3/5, HoubyMapa 3/5 (0.47), станция API30 20 mm, SRA 3d 0.2 mm, T 14.2 °C · вердикт средняя · прогноз: API30 ≥ 25 mm с 22.9. (пик 35 mm 23.9., дождь 10 mm 22.9.) — ориентировочно
 10
 ```
 
@@ -69,9 +69,12 @@ a positive `check` signal uses `10`.
 
 `brief`, `status`, `list`, `add` and `del` exit `0` on success and `1` on a
 usage error.  With no trigger firing, `check` still prints the snapshot (handy by
-hand, ignored by Hermes) and exits `0`.  Re-running `check` on the same day
-is idempotent: same text, same exit code, no duplicate emission rows. An
-emission row means the signal was printed, not that Telegram confirmed it.
+hand, ignored by Hermes) and exits `0`. Re-running `check` with identical
+source data is storage-idempotent: readings are upserted, the forecast release
+reuses its content-derived `run_id`, and emission rows are not duplicated. The
+fetch requests still happen, and a same-day retry deliberately prints the same
+text and exit code so Hermes can retry transport. An emission row means the
+signal was printed, not that Telegram confirmed it.
 
 ## The Hermes brief
 
@@ -84,11 +87,12 @@ location of plain facts in Russian: ČHMÚ map level with its change against
 yesterday and a week ago, HoubyMapa, station API30 / SRA over 1-3-7-30 days
 / temperatures / soil / humidity, a 14-day history table, a 16-day forecast
 table with the derived API30 curve and its threshold crossing, 7-day
-temperature coverage, frost, the rain episode and D+7...D+12 window, API30
-dynamics and input quality, the
+temperature coverage, frost, all distinct rain episodes, their D+7...D+12
+primary and D+13...D+21 residual phases, API30 dynamics and input quality, the
 deterministic triggers that fired, the sources that failed, and a stable
-"Как читать" cheat sheet.  It draws **no** conclusion -- that is Hermes
-Agent's job; paste `hermes/PROMPT.md` into its 08:30 cron task.  `--days N`
+"Как читать" cheat sheet. The deterministic verdict is calculated by the
+application; Hermes only shortens and formats it. Render the portable templates
+as described in `hermes/PROMPT.md` before updating its cron tasks. `--days N`
 shortens the forecast table, `--json` gives the same content as a dict
 (including `check --json`'s per-location decision data).  Exit code is
 always `0` unless every source failed or rule calculation failed. Running
@@ -119,7 +123,7 @@ in SQLite, and is dropped automatically when a location moves.
 .venv/bin/python -m pytest
 ```
 
-Fully offline (297 tests at the end of the refactor): `tests/fixtures/` holds real responses recorded on
+Fully offline (325 tests): `tests/fixtures/` holds real responses recorded on
 2026-09-07 with `MUSHROOM_RECORD=1`.  To refresh them:
 
 ```sh
@@ -147,15 +151,26 @@ failures are soft by design.
 - Forecast releases are archived in additive `forecast_runs` and
   `forecast_points` tables. Legacy `forecasts` remains dual-written for
   rollback compatibility. Metrics in one view always come from one release.
-- SQLite migrations use `PRAGMA user_version`; current schema version is 2.
+  Schema v3 adds a stable content hash: identical reruns reuse the same release,
+  while changed values on the same day create a new one.
+- SQLite migrations use `PRAGMA user_version`; current schema version is 3.
 - The application, not Hermes, calculates the conservative biological
-  verdict. A qualifying rain episode starts a D+7...D+12 growth window;
-  moisture above the API30 threshold before D+7 can produce at most a
-  medium verdict. High additionally requires fresh API30 and forecast data,
-  a valid temperature gate, sufficient history without frost, and fresh
-  high support from at least one map.
+  verdict. All qualifying rain episodes are retained; overlapping rolling
+  windows from one wet spell are merged. An older active episode outranks a
+  newer waiting episode. D+7...D+12 is the primary window, D+13...D+21 is a
+  residual phase capped at medium. Moisture before D+7 is also capped at
+  medium. High additionally requires fresh API30 and forecast data, a valid
+  temperature gate, sufficient history, no frost over the seven completed
+  station days, and fresh high support from at least one map.
 - Hermes keeps daily and Friday verdicts in independent durable notepads.
   The prompt must address the notepad by the actual cron job ID, not by the
   human-readable job name.
   Transport results remain in Hermes `delivery_outcome`; they are not copied
   into the application database. Exactly-once delivery is not guaranteed.
+
+The v3 column and index are additive and accept the v2 insert shape, but the
+v2 binary deliberately rejects a higher `user_version`. Therefore an immediate
+rollback to a v2 commit is not a SHA switch alone: while jobs are stopped, set
+`PRAGMA user_version=2` on the backed-up database, then switch code. The column
+and index stay in place and no rows are removed. Rolling forward to v3 detects
+the existing column and restores `user_version=3`.

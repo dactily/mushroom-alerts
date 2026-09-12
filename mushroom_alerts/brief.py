@@ -91,7 +91,8 @@ DASH = "—"
 HIGH_BLOCKER_LABELS = {
     "no_qualified_rain_episode": "нет подтверждённого дождевого эпизода",
     "growth_window_not_started": "окно D+7 ещё не началось",
-    "growth_window_finished": "окно D+12 закончилось",
+    "primary_window_finished_residual_active": "основное окно D+12 закончилось, действует остаточное до D+21",
+    "growth_window_finished": "остаточное окно D+21 закончилось",
     "api30_not_fresh": "API30 неполный или устарел",
     "api30_below_threshold": "API30 ниже порога",
     "forecast_not_fresh": "прогноз устарел",
@@ -485,6 +486,7 @@ def _biological_lines(view: Mapping[str, Any]) -> list[str]:
     temp = bio.get("temperature_7d") or {}
     frost = bio.get("frost") or {}
     episode = bio.get("rain_episode")
+    episodes = bio.get("rain_episodes") or []
     dynamics = bio.get("api30_dynamics") or {}
     history = bio.get("history") or {}
     guidance = bio.get("guidance") or {}
@@ -493,7 +495,13 @@ def _biological_lines(view: Mapping[str, Any]) -> list[str]:
         f"  вердикт сегодня: {guidance.get('verdict_label', 'недостаточно данных')} "
         f"(rules v{bio.get('rules_version', '?')})"
     )
+    out.append(f"  смысл: {guidance.get('scope_text', 'оценка условий участка')}")
     out.append(f"  фаза: {guidance.get('phase_text', 'недостаточно данных')}")
+    out.append(
+        f"  дождевых эпизодов учтено: {len(episodes)}; "
+        f"активных {len(guidance.get('active_event_ids') or [])}, "
+        f"ожидающих {len(guidance.get('upcoming_event_ids') or [])}"
+    )
     candidate = guidance.get("candidate_high_date")
     if candidate is None:
         out.append("  возможная высокая вероятность: нет в горизонте прогноза")
@@ -531,7 +539,8 @@ def _biological_lines(view: Mapping[str, Any]) -> list[str]:
         out.append(
             f"  дождевой эпизод: {_n(episode.get('total_mm'))} мм, максимум "
             f"{_iso(episode.get('date'))}; окно D+7...D+12 "
-            f"{_iso(growth[0])}–{_iso(growth[1])}; качество {episode.get('quality')}"
+            f"{_iso(growth[0])}–{_iso(growth[1])}; остаточное до "
+            f"{_iso(episode.get('residual_window_end'))}; качество {episode.get('quality')}"
         )
     else:
         out.append("  дождевой эпизод ≥ 20 мм / 3 д: не найден или недостаточно данных")

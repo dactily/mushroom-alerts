@@ -106,6 +106,78 @@ def test_forecast_runs_keep_two_runs_from_the_same_day(store):
     assert store.latest_forecast_run("openmeteo", "valmez")["run_id"] == runs[1]["run_id"]
 
 
+def test_identical_forecast_release_reuses_the_archived_run(store):
+    first = Reading(
+        "openmeteo",
+        "valmez",
+        date(2026, 9, 7),
+        "precip_mm",
+        1.0,
+        meta={"provisional": True, "model": "best_match"},
+    )
+    second = Reading(
+        "openmeteo",
+        "valmez",
+        date(2026, 9, 7),
+        "precip_mm",
+        1.0,
+        meta={"provisional": True, "model": "best_match"},
+    )
+
+    store.upsert_readings(
+        [first], retrieved_at=datetime(2026, 9, 7, 6, tzinfo=timezone.utc)
+    )
+    store.upsert_readings(
+        [second], retrieved_at=datetime(2026, 9, 7, 17, tzinfo=timezone.utc)
+    )
+
+    runs = store.conn.execute(
+        "SELECT * FROM forecast_runs WHERE source='openmeteo'"
+    ).fetchall()
+    assert len(runs) == 1
+    assert runs[0]["content_hash"]
+    assert first.meta["run_id"] == second.meta["run_id"] == runs[0]["run_id"]
+    assert second.meta["retrieved_at"] == "2026-09-07T06:00:00+00:00"
+
+
+def test_reupserting_the_same_mutated_reading_is_idempotent(store):
+    point = Reading(
+        "api30_forecast",
+        "valmez",
+        date(2026, 9, 8),
+        "api30_mm",
+        28.0,
+        meta={"issued": "2026-09-07", "calculation_version": "test"},
+    )
+
+    store.upsert_readings([point], input_run_ids=["input-1"])
+    first_run_id = point.meta["run_id"]
+    store.upsert_readings([point], input_run_ids=["input-1"])
+
+    assert point.meta["run_id"] == first_run_id
+    assert store.conn.execute(
+        "SELECT COUNT(*) FROM forecast_runs WHERE source='api30_forecast'"
+    ).fetchone()[0] == 1
+
+
+def test_run_level_calculation_version_does_not_change_content_identity(store):
+    point = Reading(
+        "api30_forecast",
+        "valmez",
+        date(2026, 9, 8),
+        "api30_mm",
+        28.0,
+        meta={"issued": "2026-09-07"},
+    )
+
+    store.upsert_readings([point], calculation_version="test")
+    store.upsert_readings([point], calculation_version="test")
+
+    assert store.conn.execute(
+        "SELECT COUNT(*) FROM forecast_runs WHERE source='api30_forecast'"
+    ).fetchone()[0] == 1
+
+
 def test_migration_backfills_legacy_forecasts(tmp_path):
     path = tmp_path / "legacy.sqlite"
     conn = sqlite3.connect(path)
@@ -130,11 +202,28 @@ def test_migration_backfills_legacy_forecasts(tmp_path):
 
     with Store(path) as migrated:
         assert migrated.conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+        columns = {
+            row["name"]
+            for row in migrated.conn.execute("PRAGMA table_info(forecast_runs)")
+        }
+        assert "content_hash" in columns
         run = migrated.latest_forecast_run("openmeteo", "valmez", "precip_mm")
         assert run is not None
         assert run["run_id"] == "legacy:openmeteo:2026-09-07"
         points = migrated.forecast_run_points(run["run_id"], location="valmez")
         assert len(points) == 1 and points[0]["value"] == 4.2
+
+
+def test_v3_forecast_runs_accept_the_v2_insert_shape(store):
+    store.conn.execute(
+        """INSERT INTO forecast_runs
+           (run_id, source, retrieved_at, status, input_run_ids_json, created_at)
+           VALUES ('old-writer', 'openmeteo', '2026-09-07T00:00:00+00:00',
+                   'ok', '[]', '2026-09-07T00:00:00+00:00')"""
+    )
+
+    row = store.get_forecast_run("old-writer")
+    assert row is not None and row["content_hash"] is None
 
 
 def test_latest_and_before(store):

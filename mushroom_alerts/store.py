@@ -22,10 +22,15 @@ Tables
     forecast error by horizon can be measured later (PLAN §3 trigger 4,
     PLAN §5).  ``upsert_readings`` mirrors forecast readings in here
     automatically.
+``forecast_runs`` / ``forecast_points``
+    Immutable forecast releases. Schema v3 gives new runs a content hash and
+    deterministic UUID so an identical retry reuses the original release.
+    Older rows keep a NULL hash and remain readable.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sqlite3
@@ -39,7 +44,7 @@ from .base import Location, Reading, utcnow
 __all__ = ["Store", "db_path", "DEFAULT_DB", "SCHEMA_VERSION"]
 
 DEFAULT_DB = "state.sqlite"
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS readings (
@@ -137,6 +142,12 @@ CREATE INDEX IF NOT EXISTS signal_emissions_lookup
     ON signal_emissions (location, trigger, date);
 """
 
+MIGRATION_3_INDEX = """
+CREATE UNIQUE INDEX IF NOT EXISTS forecast_runs_content
+    ON forecast_runs (source, content_hash)
+    WHERE content_hash IS NOT NULL;
+"""
+
 
 def db_path() -> Path:
     """Where the SQLite file lives (``$MUSHROOM_DB`` or ``./state.sqlite``)."""
@@ -191,6 +202,18 @@ class Store:
             self.conn.executescript(MIGRATION_2)
             self._backfill_notifications()
             self.conn.execute("PRAGMA user_version=2")
+            version = 2
+        if version < 3:
+            columns = {
+                str(row["name"])
+                for row in self.conn.execute("PRAGMA table_info(forecast_runs)")
+            }
+            if "content_hash" not in columns:
+                self.conn.execute(
+                    "ALTER TABLE forecast_runs ADD COLUMN content_hash TEXT"
+                )
+            self.conn.executescript(MIGRATION_3_INDEX)
+            self.conn.execute("PRAGMA user_version=3")
 
     def _backfill_notifications(self) -> None:
         for row in self.conn.execute("SELECT * FROM notifications ORDER BY id"):
@@ -310,22 +333,48 @@ class Store:
             return
         stamp = (retrieved_at or utcnow()).isoformat()
         for source, points in grouped.items():
-            run_id = str(uuid.uuid4())
             first_meta = next((r.meta for r in points if r.meta), {}) or {}
             upstream_issued_at = first_meta.get("upstream_issued_at")
             model = first_meta.get("model")
             version = calculation_version or first_meta.get("calculation_version")
+            inputs = sorted(set(input_run_ids))
+            content_hash = self._forecast_content_hash(
+                source,
+                points,
+                calculation_version=version,
+                input_run_ids=inputs,
+            )
+            existing = self.conn.execute(
+                """SELECT run_id, retrieved_at FROM forecast_runs
+                   WHERE source=? AND content_hash=?""",
+                (source, content_hash),
+            ).fetchone()
+            if existing is not None:
+                self._bind_forecast_run(
+                    points,
+                    run_id=str(existing["run_id"]),
+                    retrieved_at=str(existing["retrieved_at"]),
+                    calculation_version=version,
+                )
+                continue
+
+            run_id = str(
+                uuid.uuid5(
+                    uuid.NAMESPACE_URL,
+                    f"mushroom-alerts:forecast:{source}:{content_hash}",
+                )
+            )
             run_meta = {
                 "locations": sorted({r.location for r in points}),
                 "point_count": len(points),
             }
             with self.conn:
-                self.conn.execute(
-                    """INSERT INTO forecast_runs
+                inserted = self.conn.execute(
+                    """INSERT OR IGNORE INTO forecast_runs
                        (run_id, source, retrieved_at, upstream_issued_at, model,
                         calculation_version, status, input_run_ids_json,
-                        meta_json, created_at)
-                       VALUES (?, ?, ?, ?, ?, ?, 'ok', ?, ?, ?)""",
+                        meta_json, created_at, content_hash)
+                       VALUES (?, ?, ?, ?, ?, ?, 'ok', ?, ?, ?, ?)""",
                     (
                         run_id,
                         source,
@@ -333,18 +382,34 @@ class Store:
                         upstream_issued_at,
                         model,
                         version,
-                        json.dumps(sorted(set(input_run_ids))),
+                        json.dumps(inputs),
                         json.dumps(run_meta, ensure_ascii=False, sort_keys=True),
                         utcnow().isoformat(),
+                        content_hash,
                     ),
                 )
+                if not inserted.rowcount:
+                    concurrent = self.conn.execute(
+                        """SELECT run_id, retrieved_at FROM forecast_runs
+                           WHERE source=? AND content_hash=?""",
+                        (source, content_hash),
+                    ).fetchone()
+                    if concurrent is None:
+                        raise RuntimeError("forecast run identity collision")
+                    self._bind_forecast_run(
+                        points,
+                        run_id=str(concurrent["run_id"]),
+                        retrieved_at=str(concurrent["retrieved_at"]),
+                        calculation_version=version,
+                    )
+                    continue
+                self._bind_forecast_run(
+                    points,
+                    run_id=run_id,
+                    retrieved_at=stamp,
+                    calculation_version=version,
+                )
                 for reading in points:
-                    meta = dict(reading.meta or {})
-                    meta["run_id"] = run_id
-                    meta["retrieved_at"] = stamp
-                    if version:
-                        meta["calculation_version"] = version
-                    reading.meta = meta
                     self.conn.execute(
                         """INSERT INTO forecast_points
                            (run_id, source, location, target_date, metric, value, meta_json)
@@ -359,6 +424,79 @@ class Store:
                             reading.meta_json(),
                         ),
                     )
+
+    @staticmethod
+    def _forecast_content_hash(
+        source: str,
+        points: Sequence[Reading],
+        *,
+        calculation_version: str | None,
+        input_run_ids: Sequence[str],
+    ) -> str:
+        """Stable identity of a complete forecast release.
+
+        Retrieval time and the run identity injected by a previous upsert are
+        operational metadata, not forecast content.
+        """
+        canonical_points = []
+        for reading in points:
+            meta = {
+                key: value
+                for key, value in (reading.meta or {}).items()
+                if key not in {"run_id", "retrieved_at", "calculation_version"}
+            }
+            canonical_points.append(
+                {
+                    "location": reading.location,
+                    "date": _iso(reading.date),
+                    "metric": reading.metric,
+                    "value": float(reading.value),
+                    "meta": meta,
+                }
+            )
+        payload = {
+            "source": source,
+            "calculation_version": calculation_version,
+            "input_run_ids": sorted(set(input_run_ids)),
+            "points": sorted(
+                canonical_points,
+                key=lambda item: (
+                    item["location"],
+                    item["date"],
+                    item["metric"],
+                    json.dumps(
+                        item["meta"],
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        default=str,
+                    ),
+                ),
+            ),
+        }
+        encoded = json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
+    @staticmethod
+    def _bind_forecast_run(
+        points: Sequence[Reading],
+        *,
+        run_id: str,
+        retrieved_at: str,
+        calculation_version: str | None,
+    ) -> None:
+        for reading in points:
+            meta = dict(reading.meta or {})
+            meta["run_id"] = run_id
+            meta["retrieved_at"] = retrieved_at
+            if calculation_version:
+                meta["calculation_version"] = calculation_version
+            reading.meta = meta
 
     def get_reading(
         self, source: str, location: str, metric: str, day: date | str
@@ -573,13 +711,19 @@ class Store:
         return inserted
 
     def last_emission(
-        self, location: str, trigger: str | None = None
+        self,
+        location: str,
+        trigger: str | None = None,
+        emission_key: str | None = None,
     ) -> sqlite3.Row | None:
         sql = "SELECT * FROM signal_emissions WHERE location=?"
         args: list[Any] = [location]
         if trigger is not None:
             sql += " AND trigger=?"
             args.append(trigger)
+        if emission_key is not None:
+            sql += " AND emission_key=?"
+            args.append(emission_key)
         sql += " ORDER BY date DESC, id DESC LIMIT 1"
         return self.conn.execute(sql, args).fetchone()
 

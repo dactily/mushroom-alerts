@@ -243,7 +243,7 @@ def test_status_reads_the_store_without_fetching(monkeypatch, capsys):
     assert cli.main(["status"]) == 0
     out = capsys.readouterr().out
     assert "ČHMÚ 4/5" in out
-    assert "Valašská Bystřice: нет данных" in out
+    assert "Valašská Bystřice: вердикт недостаточно данных" in out
 
 
 def test_status_json(monkeypatch, capsys):
@@ -380,7 +380,7 @@ def test_status_json_serializes_the_populated_shared_view(monkeypatch, capsys):
     payload = json.loads(capsys.readouterr().out)
     view = payload["locations"][0]["view"]
     assert view["station"]["series_points"]["sra_mm"][TODAY.isoformat()]["value"] == 2.0
-    assert view["biological"]["rules_version"] == "2"
+    assert view["biological"]["rules_version"] == "3"
 
 
 def test_status_weekly_does_not_crash(capsys):

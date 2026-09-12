@@ -131,6 +131,9 @@ def test_biological_features_include_conservative_guidance(tmp_path):
     assert bio["history"]["sufficient"] is True
     assert bio["guidance"]["verdict"] == "medium"
     assert bio["guidance"]["phase"] == "waiting"
+    assert bio["guidance"]["scope"] == (
+        "site_conditions_not_observed_fruit_bodies"
+    )
 
 
 def test_rain_does_not_become_high_before_growth_window(tmp_path):
@@ -142,7 +145,7 @@ def test_rain_does_not_become_high_before_growth_window(tmp_path):
             Reading("chmi_station", VALMEZ.slug, day, "sra_mm", rain.get(offset, 0.0)),
             Reading("chmi_station", VALMEZ.slug, day, "t_mean", 15.0),
         ]
-        if offset >= -6:
+        if offset >= -7:
             readings.append(
                 Reading("chmi_station", VALMEZ.slug, day, "t_min", 8.0)
             )
@@ -224,7 +227,7 @@ def test_high_requires_an_active_growth_window(tmp_path):
             ),
             Reading("chmi_station", VALMEZ.slug, day, "t_mean", 15.0),
         ]
-        if offset >= -6:
+        if offset >= -7:
             readings.append(
                 Reading("chmi_station", VALMEZ.slug, day, "t_min", 8.0)
             )
@@ -257,9 +260,62 @@ def test_high_requires_an_active_growth_window(tmp_path):
         store.upsert_readings(api_curve, retrieved_at=stamp(7))
         guidance = location_snapshot(store, VALMEZ, TODAY)["biological"]["guidance"]
 
-    assert guidance["phase"] == "growth_window"
+    assert guidance["phase"] == "primary_window"
     assert guidance["verdict"] == "high"
     assert guidance["high_blockers"] == []
+
+
+def test_frost_history_uses_seven_completed_station_days(tmp_path):
+    readings = []
+    for offset in range(-30, 1):
+        day = TODAY + timedelta(days=offset)
+        readings += [
+            Reading(
+                "chmi_station",
+                VALMEZ.slug,
+                day,
+                "sra_mm",
+                22.0 if offset == -7 else 0.0,
+            ),
+            Reading("chmi_station", VALMEZ.slug, day, "t_mean", 15.0),
+        ]
+        if -7 <= offset <= -1:
+            readings.append(
+                Reading("chmi_station", VALMEZ.slug, day, "t_min", 8.0)
+            )
+    maps = [Reading("houbymapa", VALMEZ.slug, TODAY, "level", 4.0)]
+    api_curve = [
+        Reading(
+            "api30_forecast",
+            VALMEZ.slug,
+            TODAY,
+            "api30_mm",
+            30.0,
+            meta={"quality": "fresh"},
+        )
+    ]
+    temperatures = [
+        Reading(
+            "openmeteo",
+            VALMEZ.slug,
+            TODAY,
+            metric,
+            value,
+            meta={"issued": TODAY.isoformat()},
+        )
+        for metric, value in (("t_mean", 14.0), ("t_min", 7.0))
+    ]
+
+    with Store(tmp_path / "state.sqlite") as store:
+        store.upsert_readings(readings + maps, retrieved_at=stamp(5))
+        store.upsert_readings(temperatures, retrieved_at=stamp(6))
+        store.upsert_readings(api_curve, retrieved_at=stamp(7))
+        bio = location_snapshot(store, VALMEZ, TODAY)["biological"]
+
+    assert bio["frost"]["start"] == TODAY - timedelta(days=7)
+    assert bio["frost"]["end"] == TODAY - timedelta(days=1)
+    assert bio["frost"]["covered_days"] == 7
+    assert bio["guidance"]["verdict"] == "high"
 
 
 def test_rain_episode_requires_complete_temperature_window(tmp_path):

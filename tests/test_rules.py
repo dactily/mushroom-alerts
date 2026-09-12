@@ -425,6 +425,7 @@ def test_decide_fires_and_names_only_the_triggered_location(store):
     assert decision.exit_code == 10
     assert "Valašské Meziříčí" in decision.text
     assert "Valašská Bystřice" not in decision.text
+    assert "вердикт средняя" in decision.text
 
 
 def test_evaluate_and_render_do_not_record_emissions(store):
@@ -617,6 +618,53 @@ def test_rain_window_needs_the_api30_to_hold(store):
     assert decision.exit_code == 0
 
 
+def test_active_old_rain_window_is_not_hidden_by_new_rain(store):
+    old_rain = TODAY - timedelta(days=7)
+    new_rain = TODAY - timedelta(days=1)
+    station_history(store, rain={old_rain: 60.0, new_rain: 22.0})
+
+    decision = _decide(store, [result("chmi_station", [])])
+    location = decision.data["locations"]["valmez"]
+    guidance = location["snapshot"]["biological"]["guidance"]
+
+    assert guidance["phase"] == "primary_window"
+    assert len(location["snapshot"]["biological"]["rain_episodes"]) == 2
+    assert {signal["trigger"] for signal in location["signals"]} == {
+        "rain_forecast",
+        "rain_window",
+    }
+
+
+def test_one_continuing_rain_episode_is_not_announced_twice(store):
+    station_history(store, rain={TODAY: 22.0})
+    first = _decide(store, [result("chmi_station", [])])
+    first_signal = first.data["locations"]["valmez"]["signals"][0]
+    assert first_signal["trigger"] == "rain_forecast"
+
+    tomorrow = TODAY + timedelta(days=1)
+    station_history(store, rain={TODAY: 22.0, tomorrow: 30.0}, end=tomorrow)
+    second = _decide(
+        store, [result("chmi_station", [])], today=tomorrow
+    )
+
+    assert second.exit_code == 0
+    assert second.data["locations"]["valmez"]["suppressed"] == [
+        "rain_forecast"
+    ]
+
+
+def test_antispam_checks_the_matching_event_key_not_only_the_latest(store):
+    store.add_emission(
+        TODAY - timedelta(days=1), "valmez", "rain_window", "old", "{}"
+    )
+    store.add_emission(
+        TODAY - timedelta(days=1), "valmez", "rain_window", "new", "{}"
+    )
+    signal = rules.Signal("rain_window", "old event", "old", cooldown=7)
+
+    assert rules._allowed(store, "valmez", signal, TODAY) is False
+
+
 # ----------------------------------------------------------------------
 # snapshot / describe
 # ----------------------------------------------------------------------
@@ -638,12 +686,14 @@ def test_describe_is_one_compact_line(store):
     assert line.count("\n") == 0
     assert line.startswith("🍄 Valašské Meziříčí:")
     for fragment in ("ČHMÚ 3/5", "HoubyMapa 3/5 (0.47)", "станция API30 20 mm",
-                     "SRA 3d 12 mm", "T 15.0 °C", "прогноз:", "порог 25 mm"):
+                     "SRA 3d 12 mm", "T 15.0 °C", "вердикт", "прогноз:", "порог 25 mm"):
         assert fragment in line, line
 
 
 def test_describe_without_any_data(store):
-    assert rules.describe(store, BYSTRICE, TODAY).endswith("нет данных")
+    assert rules.describe(store, BYSTRICE, TODAY).endswith(
+        "вердикт недостаточно данных"
+    )
 
 
 def test_decide_survives_a_location_with_no_data_at_all(store):

@@ -158,7 +158,8 @@ def test_render_has_every_section(tmp_path):
     assert "температура почвы: 5 см 17.6 °C, 10 см 17.7 °C" in text
     assert "влажность: 81 %" in text
     assert "биологическая оценка (детерминированная):" in text
-    assert "вердикт сегодня: средняя (rules v2)" in text
+    assert "вердикт сегодня: средняя (rules v3)" in text
+    assert "не подтверждение отдельных плодовых тел" in text
     assert "возможная высокая вероятность:" in text
     assert "T средняя 7 д:" in text and "динамика API30:" in text
 
@@ -253,7 +254,7 @@ def test_brief_stays_compact(tmp_path):
         payload = brief_lib.build(store, [VALMEZ], TODAY)
     text = brief_lib.render(payload)
     body = text.split("Как читать")[0]
-    assert len(body.encode("utf-8")) < 4000, len(body.encode("utf-8"))
+    assert len(body.encode("utf-8")) < 4200, len(body.encode("utf-8"))
 
 
 # ----------------------------------------------------------------------
