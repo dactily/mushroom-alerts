@@ -429,3 +429,87 @@ def test_cli_brief_is_idempotent(monkeypatch, capsys):
         ).fetchone()["c"]
     assert rows > 0
     assert sys.modules.get("mushroom_alerts.rules") is not None
+
+
+# ----------------------------------------------------------------------
+# ``brief --mode``: the short block the cron jobs actually print
+# ----------------------------------------------------------------------
+def test_cli_brief_mode_daily_prints_the_block_and_records_it(monkeypatch, capsys):
+    full_stack(monkeypatch)
+    assert cli.main(["brief", "--mode", "daily"]) == 0
+    out = capsys.readouterr().out
+    assert out.startswith("ОТПРАВЛЯТЬ: да\n")
+    assert "ПРИЧИНА: первый запуск" in out
+    assert "ЗАГОЛОВОК: 🍄 Грибной прогноз: " in out
+    assert "ИТОГ:" in out and "ФАЗА:" in out and "ОГОВОРКИ:" in out
+    # no tables, no cheat sheet, no ISO dates
+    assert "история 14 дн." not in out and "Как читать" not in out
+    assert TODAY.isoformat() not in out
+    assert len(out.encode("utf-8")) <= 1536, len(out.encode("utf-8"))
+    with Store() as store:
+        row = store.last_report("daily")
+    assert row["mode"] == "daily" and row["sent"] == 1
+
+
+def test_cli_brief_mode_weekend_always_sends(monkeypatch, capsys):
+    full_stack(monkeypatch)
+    assert cli.main(["brief", "--mode", "weekend"]) == 0
+    out = capsys.readouterr().out
+    assert out.startswith("ОТПРАВЛЯТЬ: да\n")
+    assert "ПРИЧИНА: плановый прогноз на выходные" in out
+    assert "Грибной прогноз на выходные " in out
+
+
+def test_cli_brief_mode_is_idempotent_on_the_same_day(monkeypatch, capsys):
+    full_stack(monkeypatch)
+    cli.main(["brief", "--mode", "daily"])
+    first = capsys.readouterr().out
+    cli.main(["brief", "--mode", "daily"])
+    assert capsys.readouterr().out == first
+    with Store() as store:
+        rows = store.conn.execute("SELECT COUNT(*) c FROM reports").fetchone()["c"]
+    assert rows == 1
+
+
+def test_cli_brief_mode_stays_silent_when_nothing_moved(monkeypatch, capsys):
+    """A report from an earlier date, identical to today, means [SILENT]."""
+    full_stack(monkeypatch)
+    assert cli.main(["brief", "--mode", "daily"]) == 0
+    capsys.readouterr()
+    with Store() as store:
+        row = store.last_report("daily")
+        store.save_report(
+            TODAY - timedelta(days=1),
+            "daily",
+            verdicts=json.loads(row["verdicts_json"]),
+            candidates=json.loads(row["candidates_json"]),
+            events=json.loads(row["events_json"]),
+            error_class=row["error_class"],
+            rules_version=row["rules_version"],
+            sent=True,
+            reason="вчера",
+        )
+    assert cli.main(["brief", "--mode", "daily"]) == 0
+    out = capsys.readouterr().out
+    assert out.startswith("ОТПРАВЛЯТЬ: нет\n")
+    assert "ПРИЧИНА: ничего не изменилось с прошлого отчёта" in out
+
+
+def test_cli_brief_mode_json(monkeypatch, capsys):
+    full_stack(monkeypatch)
+    assert cli.main(["brief", "--mode", "daily", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["mode"] == "daily" and payload["send"] is True
+    assert payload["exit_code"] == 0
+    assert payload["date"] == TODAY.isoformat()
+    assert {loc["slug"] for loc in payload["locations"]} == {"valmez", "valasska-bystrice"}
+    assert payload["text"].startswith("ОТПРАВЛЯТЬ: да")
+
+
+def test_cli_brief_mode_reports_a_total_blackout(monkeypatch, capsys):
+    use_fetchers(monkeypatch, [fake_module("chmi_map", ok=False, error="boom")])
+    assert cli.main(["brief", "--mode", "weekend"]) == 1
+    out = capsys.readouterr().out
+    assert out.startswith("ОТПРАВЛЯТЬ: да\n")
+    assert "бриф не собрался" in out
+    assert "ИТОГ: данных нет, прогноз не собрался" in out

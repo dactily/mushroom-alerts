@@ -4,10 +4,11 @@ Daily mushroom-growth signal for a handful of places around Valašské
 Meziříčí, assembled from the ČHMÚ growth-probability raster, HoubyMapa, ČHMÚ
 station open data and Open-Meteo -- plus an API30 rain index projected 16
 days ahead, which none of the upstreams offers.  No bot of its own: it is a
-CLI that Hermes Agent runs from cron.  `brief` prints the facts and Hermes
-turns them into a sentence ("how likely now, and when does it become
-likely"); `check` keeps the deterministic exit-code contract for when no
-interpretation is wanted.  Nothing here calls an LLM.  See `PLAN.md` for
+CLI that Hermes Agent runs from cron.  `brief --mode daily|weekend` prints a
+short block that is already worded for a human and already says whether to
+send it at all; Hermes only re-words it for Telegram.  Plain `brief` prints
+every fact and both tables for debugging, and `check` keeps the deterministic
+exit-code contract for when no interpretation is wanted.  Nothing here calls an LLM.  See `PLAN.md` for
 the whole design, `hermes/PROMPT.md` for the text pasted into the Hermes
 cron job, `mushroom_alerts/base.py` for the contract every source module
 follows, and `mushroom_alerts/rules.py` for the triggers.
@@ -26,9 +27,11 @@ python3 -m venv .venv
 .venv/bin/python -m mushroom_alerts check --json     # machine-readable
 .venv/bin/python -m mushroom_alerts check --only chmi_map,houbymapa
 
-.venv/bin/python -m mushroom_alerts brief            # facts for Hermes to read
+.venv/bin/python -m mushroom_alerts brief --mode daily    # ready block + send flag
+.venv/bin/python -m mushroom_alerts brief --mode weekend  # weekend plan, always sent
+.venv/bin/python -m mushroom_alerts brief                 # full debug view
 .venv/bin/python -m mushroom_alerts brief --json
-.venv/bin/python -m mushroom_alerts brief --days 7   # shorter forecast table
+.venv/bin/python -m mushroom_alerts brief --days 7        # shorter forecast table
 
 .venv/bin/python -m mushroom_alerts status           # last stored snapshot
 .venv/bin/python -m mushroom_alerts status --json
@@ -90,9 +93,13 @@ table with the derived API30 curve and its threshold crossing, 7-day
 temperature coverage, frost, all distinct rain episodes, their D+7...D+12
 primary and D+13...D+21 residual phases, API30 dynamics and input quality, the
 deterministic triggers that fired, the sources that failed, and a stable
-"Как читать" cheat sheet. The deterministic verdict is calculated by the
-application; Hermes only shortens and formats it. Render the portable templates
-as described in `hermes/PROMPT.md` before updating its cron tasks. `--days N`
+"Как читать" cheat sheet. That view is for debugging.
+
+What the cron jobs actually run is `brief --mode daily` or `--mode weekend`:
+under 1.5 KB, no tables, Russian, with `ОТПРАВЛЯТЬ: да|нет` on the first line.
+The decision compares today against the last report of an earlier date stored
+in `reports`; the weekend plan is always sent. `--mode --json` prints the same
+fields as a dict. `--days N`
 shortens the forecast table, `--json` gives the same content as a dict
 (including `check --json`'s per-location decision data).  Exit code is
 always `0` unless every source failed or rule calculation failed. Running
@@ -153,7 +160,8 @@ failures are soft by design.
   rollback compatibility. Metrics in one view always come from one release.
   Schema v3 adds a stable content hash: identical reruns reuse the same release,
   while changed values on the same day create a new one.
-- SQLite migrations use `PRAGMA user_version`; current schema version is 3.
+- SQLite migrations use `PRAGMA user_version`; current schema version is 4.
+  Schema v4 adds the additive `reports` table (one row per date and mode).
 - The application, not Hermes, calculates the conservative biological
   verdict. All qualifying rain episodes are retained; overlapping rolling
   windows from one wet spell are merged. An older active episode outranks a
@@ -162,9 +170,11 @@ failures are soft by design.
   medium. High additionally requires fresh API30 and forecast data, a valid
   temperature gate, sufficient history, no frost over the seven completed
   station days, and fresh high support from at least one map.
-- Hermes keeps daily and Friday verdicts in independent durable notepads.
-  The prompt must address the notepad by the actual cron job ID, not by the
-  human-readable job name.
+- The application also decides whether to send at all. `brief --mode
+  daily|weekend` prints a short ready-to-send Russian block starting with
+  `ОТПРАВЛЯТЬ: да|нет`, and stores the state it compared against in the
+  `reports` table. Hermes only re-words that block; durable notepads are no
+  longer used.
   Transport results remain in Hermes `delivery_outcome`; they are not copied
   into the application database. Exactly-once delivery is not guaranteed.
 
@@ -174,3 +184,7 @@ rollback to a v2 commit is not a SHA switch alone: while jobs are stopped, set
 `PRAGMA user_version=2` on the backed-up database, then switch code. The column
 and index stay in place and no rows are removed. Rolling forward to v3 detects
 the existing column and restores `user_version=3`.
+
+Schema v4 is the same kind of step: the new `reports` table is additive, and a
+rollback to a v3 binary needs `PRAGMA user_version=3` while the jobs are
+stopped. The table itself may stay; no other table is touched.

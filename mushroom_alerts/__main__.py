@@ -13,10 +13,13 @@ the other sources carry on (PLAN §6).
 renders the result, and records only signals emitted to stdout.
 
 ``brief`` runs the very same pipeline (:func:`run_pipeline` + :func:`_decide`)
-and then prints the facts at length instead of collapsing them: it is what
-Hermes Agent reads and interprets (PLAN §2b, ``mushroom_alerts/brief.py``,
-``hermes/PROMPT.md``). It exits ``1`` when every source failed or rule
-calculation failed; partial results remain exit ``0``.
+and then prints the facts at length instead of collapsing them: the debugging
+view (PLAN §2b, ``mushroom_alerts/brief.py``). With ``--mode daily|weekend``
+it prints instead the short ready-to-send block from ``report.py``, including
+the send/silent flag computed against the stored previous report -- that is
+what Hermes reads and only re-words (``hermes/PROMPT.md``). It exits ``1``
+when every source failed or rule calculation failed; partial results remain
+exit ``0``.
 
 ``status`` never fetches: it renders the shared location view from SQLite.
 """
@@ -51,6 +54,7 @@ from .locations import (
     locations_path,
     remove_location,
 )
+from . import report as report_lib
 from . import rules as rules_lib
 from .store import Store
 
@@ -283,6 +287,10 @@ def cmd_check(args: argparse.Namespace) -> int:
 def cmd_brief(args: argparse.Namespace) -> int:
     """The Hermes brief: same pipeline as ``check``, facts instead of a verdict.
 
+    Without ``--mode`` this is the full debugging view with both tables.
+    With ``--mode`` it is the short human block plus the send decision, and
+    the run is recorded in ``reports`` so tomorrow can compare against it.
+
     Exit code is always ``0`` -- the brief is meant to be read, not keyed
     off -- except when *every* source failed, which is exit ``1`` like
     everywhere else.  Partial failure is fine: the dead source becomes a
@@ -323,7 +331,32 @@ def cmd_brief(args: argparse.Namespace) -> int:
             results=run.results,
         )
 
-    exit_code = EXIT_ERROR if run.all_failed or calculation_error else EXIT_SILENT
+        exit_code = EXIT_ERROR if run.all_failed or calculation_error else EXIT_SILENT
+        mode = getattr(args, "mode", None)
+        if mode:
+            summary = report_lib.summarize(
+                payload,
+                mode=mode,
+                today=today,
+                calculation_error=calculation_error,
+                all_failed=run.all_failed,
+            )
+            send, reason = report_lib.publish(store, summary)
+            if args.json:
+                print(
+                    jsonlib.dumps(
+                        dict(
+                            report_lib.to_json(summary, send=send, reason=reason),
+                            exit_code=exit_code,
+                        ),
+                        ensure_ascii=False,
+                        indent=2,
+                    )
+                )
+            else:
+                print(report_lib.render(summary, send=send, reason=reason), end="")
+            return exit_code
+
     if args.json:
         payload = dict(
             brief_lib.to_json(payload),
@@ -479,6 +512,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=16,
         metavar="N",
         help="forecast horizon in days (default 16, Open-Meteo's maximum)",
+    )
+    p_brief.add_argument(
+        "--mode",
+        choices=report_lib.MODES,
+        help="print the short ready-to-send report block instead of the tables",
     )
     p_brief.set_defaults(func=cmd_brief)
 

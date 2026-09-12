@@ -2,38 +2,45 @@
 
 ## Runtime
 
-- `mushroom_brief.sh` runs before the agent. Its stdout is the complete input
+- The wrapper script runs before the agent. Its stdout is the complete input
   for the message; the agent must not run the application a second time.
-- `daily_prompt.txt.in` is the daily 08:30 Europe/Prague template. It may return
-  exactly `[SILENT]`.
-- `friday_prompt.txt.in` is the Friday 19:00 template and always produces the
-  weekend report.
-- The application calculates the biological verdict, cycle phase and the
-  per-day forecast verdict. Hermes only shortens and formats them. It must not
-  promote a verdict from API30 or map values.
+- `mushroom_brief.sh` (daily 08:30 Europe/Prague) runs
+  `brief --mode daily`; `mushroom_weekend.sh` (Friday 19:00) runs
+  `brief --mode weekend`.
+- The application computes everything: per-location verdict, cycle phase,
+  outlook, the caveats, and the send/silent decision. The block starts with
+  `ОТПРАВЛЯТЬ: да|нет`. `нет` means the agent answers exactly `[SILENT]`.
+- `daily_prompt.txt` and `friday_prompt.txt` are the two prompts. They only
+  tell the agent to obey that flag and to re-word the block as a Telegram
+  message, keeping every number and date verbatim.
+- Continuity is no longer the agent's business: the durable notepad
+  (`mushroom_state`) and `render_prompts.py` are gone. The previous report
+  lives in the SQLite table `reports`, and the script compares against it.
+  Nothing needs job IDs or the Hermes CLI path any more, so both prompts are
+  deployed as-is.
 - `delivery_outcome` in the Hermes run journal is the transport result.
   Приложение не синхронизирует его обратно в SQLite.
-- Exactly-once не гарантируется. If delivery fails after the notepad update,
-  the durable state already contains the new verdict.
+- Exactly-once не гарантируется. If delivery fails after the row in
+  `reports` was written, the stored state already contains the new verdict.
 
-## Durable notepad binding
+## Send rules (in the script, not in the prompt)
 
-`cron notepad` accepts a cron job ID, not the human-readable job name. IDs and
-the absolute Hermes CLI path are deployment data and are no longer committed
-in prompt source. Render both prompts after resolving the actual job IDs on the
-target host:
+Daily, `send = да` when at least one holds:
 
-```bash
-python3 hermes/render_prompts.py \
-  --daily-job-id "$MUSHROOM_DAILY_JOB_ID" \
-  --weekend-job-id "$MUSHROOM_WEEKEND_JOB_ID" \
-  --hermes-cli /absolute/path/to/hermes \
-  --output-dir /tmp/mushroom-prompts
-```
+1. there is no daily report from an earlier date (first run);
+2. a location verdict differs from the last daily report;
+3. the candidate high-probability date newly entered the next 7 days,
+   disappeared from them, or moved by more than 2 days;
+4. `error_class` changed (`none` / `station` / `brief`); a dead ČHMÚ map or
+   HoubyMapa never changes it and only appears in `ОГОВОРКИ`.
 
-Deploy the two rendered `.txt` files, never the `.txt.in` templates. The
-renderer rejects relative CLI paths and malformed job IDs. The daily and
-weekend jobs must never read or write each other's notepad.
+Weekend: always `да`. Re-running a mode on the same day is idempotent — the
+comparison is always against the last report from an earlier date, and the
+row for today is replaced.
+
+Deterministic fallback without any agent reasoning is unchanged:
+`python -m mushroom_alerts check`, exit `10` → forward stdout, `0` → silence,
+`1` → error.
 
 ## Biological verdict v3
 
@@ -53,20 +60,21 @@ requires:
   minimum-temperature history;
 - fresh high support from at least one of ČHMÚ map or HoubyMapa.
 
-The maps remain model evidence, not proof that mushrooms are present. Inside
-the calculated window Hermes must describe growth as possible, not as a
-confirmed wave.
+The maps remain model evidence, not proof that mushrooms are present. The
+wording for every phase is produced by `report.py`, so the agent never has to
+describe a window or decide how confident to sound.
 
 ## Deployment note
 
-Copy the wrapper to the family profile and keep executable permissions:
+Copy both wrappers to the family profile and keep executable permissions:
 
 ```bash
-cp hermes/mushroom_brief.sh ~/.hermes/profiles/family/scripts/
-chmod 700 ~/.hermes/profiles/family/scripts/mushroom_brief.sh
+cp hermes/mushroom_brief.sh hermes/mushroom_weekend.sh \
+   ~/.hermes/profiles/family/scripts/
+chmod 700 ~/.hermes/profiles/family/scripts/mushroom_brief.sh \
+          ~/.hermes/profiles/family/scripts/mushroom_weekend.sh
 ```
 
 Prompt updates are applied to the existing jobs by the server deployment
-procedure using the rendered files. Creating new jobs is deliberately not
-documented here because their IDs must first be resolved and bound at deploy
-time.
+procedure using `hermes/daily_prompt.txt` and `hermes/friday_prompt.txt`
+verbatim. The two jobs are independent and share nothing but the SQLite file.

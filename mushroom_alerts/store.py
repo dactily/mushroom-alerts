@@ -26,6 +26,10 @@ Tables
     Immutable forecast releases. Schema v3 gives new runs a content hash and
     deterministic UUID so an identical retry reuses the original release.
     Older rows keep a NULL hash and remain readable.
+``reports``
+    One row per rendered Hermes report (date, mode).  It holds the compact
+    state the send/silent decision compares against, so continuity lives in
+    SQLite rather than in an agent's notepad (PLAN §2b).
 """
 
 from __future__ import annotations
@@ -44,7 +48,7 @@ from .base import Location, Reading, utcnow
 __all__ = ["Store", "db_path", "DEFAULT_DB", "SCHEMA_VERSION"]
 
 DEFAULT_DB = "state.sqlite"
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS readings (
@@ -142,6 +146,24 @@ CREATE INDEX IF NOT EXISTS signal_emissions_lookup
     ON signal_emissions (location, trigger, date);
 """
 
+MIGRATION_4 = """
+CREATE TABLE IF NOT EXISTS reports (
+    id             INTEGER PRIMARY KEY,
+    date           TEXT NOT NULL,
+    mode           TEXT NOT NULL,
+    verdicts_json  TEXT NOT NULL DEFAULT '{}',
+    candidates_json TEXT NOT NULL DEFAULT '{}',
+    events_json    TEXT NOT NULL DEFAULT '{}',
+    error_class    TEXT NOT NULL DEFAULT 'none',
+    rules_version  TEXT NOT NULL DEFAULT '',
+    sent           INTEGER NOT NULL DEFAULT 0,
+    reason         TEXT NOT NULL DEFAULT '',
+    created_at     TEXT NOT NULL,
+    UNIQUE (date, mode)
+);
+CREATE INDEX IF NOT EXISTS reports_lookup ON reports (mode, date);
+"""
+
 MIGRATION_3_INDEX = """
 CREATE UNIQUE INDEX IF NOT EXISTS forecast_runs_content
     ON forecast_runs (source, content_hash)
@@ -214,6 +236,10 @@ class Store:
                 )
             self.conn.executescript(MIGRATION_3_INDEX)
             self.conn.execute("PRAGMA user_version=3")
+            version = 3
+        if version < 4:
+            self.conn.executescript(MIGRATION_4)
+            self.conn.execute("PRAGMA user_version=4")
 
     def _backfill_notifications(self) -> None:
         for row in self.conn.execute("SELECT * FROM notifications ORDER BY id"):
@@ -724,6 +750,69 @@ class Store:
         if emission_key is not None:
             sql += " AND emission_key=?"
             args.append(emission_key)
+        sql += " ORDER BY date DESC, id DESC LIMIT 1"
+        return self.conn.execute(sql, args).fetchone()
+
+    # ------------------------------------------------------------------
+    # reports: the state the send/silent decision compares against
+    # ------------------------------------------------------------------
+    def save_report(
+        self,
+        day: date | str,
+        mode: str,
+        *,
+        verdicts: dict[str, Any],
+        candidates: dict[str, Any],
+        events: dict[str, Any],
+        error_class: str,
+        rules_version: str,
+        sent: bool,
+        reason: str,
+    ) -> None:
+        """Write (or replace) the report row for one ``(date, mode)`` pair.
+
+        Replacing keeps a same-day re-run idempotent: the decision itself is
+        taken against the last report from an *earlier* date, so re-running
+        never invents a change out of its own previous row.
+        """
+        with self.conn:
+            self.conn.execute(
+                """INSERT INTO reports
+                   (date, mode, verdicts_json, candidates_json, events_json,
+                    error_class, rules_version, sent, reason, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT (date, mode) DO UPDATE SET
+                    verdicts_json=excluded.verdicts_json,
+                    candidates_json=excluded.candidates_json,
+                    events_json=excluded.events_json,
+                    error_class=excluded.error_class,
+                    rules_version=excluded.rules_version,
+                    sent=excluded.sent,
+                    reason=excluded.reason,
+                    created_at=excluded.created_at""",
+                (
+                    _iso(day),
+                    mode,
+                    json.dumps(verdicts, ensure_ascii=False, sort_keys=True),
+                    json.dumps(candidates, ensure_ascii=False, sort_keys=True),
+                    json.dumps(events, ensure_ascii=False, sort_keys=True),
+                    error_class,
+                    rules_version,
+                    1 if sent else 0,
+                    reason,
+                    utcnow().isoformat(),
+                ),
+            )
+
+    def last_report(
+        self, mode: str, *, before: date | str | None = None
+    ) -> sqlite3.Row | None:
+        """Newest report for ``mode``, optionally strictly before a date."""
+        sql = "SELECT * FROM reports WHERE mode=?"
+        args: list[Any] = [mode]
+        if before is not None:
+            sql += " AND date < ?"
+            args.append(_iso(before))
         sql += " ORDER BY date DESC, id DESC LIMIT 1"
         return self.conn.execute(sql, args).fetchone()
 
