@@ -127,11 +127,16 @@ class _QualifiedWindow:
     end: date
 
 
-def _value(raw: float | SeriesPoint) -> float:
+def _value(raw: float | SeriesPoint | None) -> float | None:
+    """Numeric value of a series entry, or ``None`` when it carries none.
+
+    ``calendar_window`` silently skips empty points, so the anchor search has
+    to skip them the same way instead of raising and killing the whole brief.
+    """
+    if raw is None:
+        return None
     if isinstance(raw, SeriesPoint):
-        if raw.value is None:
-            raise ValueError("series point has no value")
-        return float(raw.value)
+        return None if raw.value is None else float(raw.value)
     return float(raw)
 
 
@@ -145,16 +150,20 @@ def _episode_from_group(
     windows: Sequence[_QualifiedWindow],
     rain_points: Mapping[date, float | SeriesPoint],
     temperature_points: Mapping[date, float | SeriesPoint],
-) -> RainEpisode:
+) -> RainEpisode | None:
     start = min(item.start for item in windows)
     end = max(item.end for item in windows)
     days = (end - start).days + 1
     rain = calendar_window(rain_points, end, days)
     temperature = calendar_window(temperature_points, end, days)
-    candidates = [day for day in rain_points if start <= day <= end]
-    anchor = max(candidates, key=lambda day: (_value(rain_points[day]), day))
-    if rain.total is None or temperature.mean is None:
-        raise ValueError("qualified episode lost its source data")
+    candidates = [
+        (day, value)
+        for day, raw in rain_points.items()
+        if start <= day <= end and (value := _value(raw)) is not None
+    ]
+    if not candidates or rain.total is None or temperature.mean is None:
+        return None
+    anchor = max(candidates, key=lambda item: (item[1], item[0]))[0]
     return RainEpisode(
         event_id=_event_id(location, start),
         location=location,
@@ -206,10 +215,11 @@ def detect_rain_episodes(
             groups.append([window])
         else:
             groups[-1].append(window)
-    return tuple(
+    built = (
         _episode_from_group(location, group, rain_points, temperature_points)
         for group in groups
     )
+    return tuple(episode for episode in built if episode is not None)
 
 
 def _phase(episode: RainEpisode, day: date) -> str:
@@ -294,8 +304,16 @@ def assess_day(
     map_high: bool,
     usable_input: bool,
     threshold_mm: float,
+    map_relevant: bool = True,
 ) -> DayAssessment:
-    """Evaluate one day, taking the strongest phase across all episodes."""
+    """Evaluate one day, taking the strongest phase across all episodes.
+
+    ``map_high`` describes the maps as published *today*.  That is evidence
+    about today only: ČHMÚ and HoubyMapa publish no forecast, so a level that
+    happens to be 3 this morning says nothing about a day a week out.  Callers
+    pass ``map_relevant=False`` for future days, where the map neither blocks
+    a high verdict nor props up a medium one.
+    """
     dominant, phase = _dominant(episodes, day)
     active = tuple(
         item.event_id
@@ -328,7 +346,8 @@ def assess_day(
         blockers.append("history_insufficient")
     if not frost_known or frost_present:
         blockers.append("frost_or_incomplete_frost_history")
-    if not map_high:
+    map_support = map_high and map_relevant
+    if map_relevant and not map_high:
         blockers.append("no_fresh_high_map_support")
 
     if not blockers:
@@ -348,7 +367,7 @@ def assess_day(
                 and float(api30_mm) < policy.API30_BANDS_MM[0]
             ):
                 event_support = False
-        if event_support or map_high:
+        if event_support or map_support:
             verdict = "medium"
         else:
             verdict = "low" if usable_input else "insufficient"
@@ -399,6 +418,7 @@ def assess_horizon(
             map_high=map_high,
             usable_input=usable_input,
             threshold_mm=threshold_mm,
+            map_relevant=day == today,
         )
         for day in ordered
     )

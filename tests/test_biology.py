@@ -214,3 +214,76 @@ def test_incomplete_temperature_window_does_not_form_an_episode():
     assert biology.detect_rain_episodes(
         "forest", rain, temperature, TODAY
     ) == ()
+
+
+def test_todays_map_level_does_not_gate_future_days():
+    """The maps publish no forecast, so today's level judges today only."""
+    event = _episode(anchor_offset=0)
+    future = TODAY + timedelta(days=8)
+
+    assessment = biology.assess_horizon(
+        TODAY,
+        (event,),
+        [TODAY, future],
+        api30={TODAY: 30.0, future: 30.0},
+        api30_quality={TODAY: DataQuality.FRESH, future: DataQuality.FRESH},
+        t_mean={TODAY: 15.0, future: 15.0},
+        t_min={TODAY: 8.0, future: 8.0},
+        forecast_fresh=True,
+        history_sufficient=True,
+        frost_known=True,
+        frost_present=False,
+        map_high=False,
+        usable_input=True,
+        threshold_mm=policy.API30_THRESHOLD_MM,
+    )
+
+    today_day = assessment.outlook[0]
+    future_day = assessment.outlook[-1]
+    assert "no_fresh_high_map_support" in today_day.high_blockers
+    assert today_day.verdict == "medium"
+    assert future_day.high_blockers == ()
+    assert future_day.verdict == "high"
+    assert assessment.candidate_high_date == future
+
+
+def test_todays_map_does_not_raise_future_days_to_medium():
+    future = TODAY + timedelta(days=5)
+
+    assessment = biology.assess_horizon(
+        TODAY,
+        (),
+        [TODAY, future],
+        api30={TODAY: 30.0, future: 30.0},
+        api30_quality={TODAY: DataQuality.FRESH, future: DataQuality.FRESH},
+        t_mean={TODAY: 15.0, future: 15.0},
+        t_min={TODAY: 8.0, future: 8.0},
+        forecast_fresh=True,
+        history_sufficient=True,
+        frost_known=True,
+        frost_present=False,
+        map_high=True,
+        usable_input=True,
+        threshold_mm=policy.API30_THRESHOLD_MM,
+    )
+
+    assert assessment.outlook[0].verdict == "medium"
+    assert assessment.outlook[-1].verdict == "low"
+
+
+def test_empty_series_point_inside_an_episode_is_skipped():
+    """A point without a value is skipped, exactly as in calendar_window."""
+    start = TODAY - timedelta(days=35)
+    rain: dict[date, float | SeriesPoint] = _series(
+        start, TODAY, {TODAY - timedelta(days=7): 24.0}
+    )
+    gap = TODAY - timedelta(days=6)
+    rain[gap] = SeriesPoint(
+        date=gap, value=None, source="chmi_station", quality=DataQuality.MISSING
+    )
+    temperature = {day: 15.0 for day in _series(start, TODAY, {})}
+
+    episodes = biology.detect_rain_episodes("forest", rain, temperature, TODAY)
+
+    assert len(episodes) == 1
+    assert episodes[0].anchor == TODAY - timedelta(days=7)
