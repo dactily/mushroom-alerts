@@ -5,9 +5,10 @@ Why this exists
 ``check`` collapses everything into one line per location and an exit code.
 That is a good machine contract and a poor thing to read: "API30 20 mm,
 SRA 3d 0.2 mm" says nothing to a human about whether to take a basket.
-Interpretation now lives in Hermes Agent (see ``hermes/PROMPT.md``); this
-module is the other half of that split -- it prints **only facts**, in a
-compact, deterministic, LLM-friendly shape, and never draws a conclusion.
+The conservative biological verdict now lives in the application. Hermes
+Agent (see ``hermes/PROMPT.md``) only turns that verdict and the underlying
+facts into short prose. This prevents an LLM from treating moisture
+immediately after rain as proof that fruiting bodies already exist.
 
 ``check`` remains the deterministic exit-code interface (PLAN §2b).
 
@@ -86,6 +87,19 @@ CHEAT_SHEET = policy.interpretation_guide()
 # small formatting helpers
 # ----------------------------------------------------------------------
 DASH = "—"
+
+HIGH_BLOCKER_LABELS = {
+    "no_qualified_rain_episode": "нет подтверждённого дождевого эпизода",
+    "growth_window_not_started": "окно D+7 ещё не началось",
+    "growth_window_finished": "окно D+12 закончилось",
+    "api30_not_fresh": "API30 неполный или устарел",
+    "api30_below_threshold": "API30 ниже порога",
+    "forecast_not_fresh": "прогноз устарел",
+    "temperature_gate_failed": "температурное условие не выполнено",
+    "history_insufficient": "истории недостаточно",
+    "frost_or_incomplete_frost_history": "есть заморозок или неполна история минимумов",
+    "no_fresh_high_map_support": "нет свежей высокой поддержки карт",
+}
 
 
 def local_now() -> datetime:
@@ -288,6 +302,11 @@ def location_view(
     f_mean = dict(bundle.get("t_mean") or {})
     f_min = dict(bundle.get("t_min") or {})
     api_curve = dict(bundle.get("curve") or [])
+    biological = snap.get("biological") or {}
+    outlook = {
+        row["date"]: row
+        for row in (biological.get("guidance") or {}).get("outlook", [])
+    }
 
     rows = []
     for offset in range(0, max(days, 0) + 1):
@@ -299,10 +318,12 @@ def location_view(
             "t_mean": f_mean.get(day),
             "t_min": f_min.get(day),
             "api30_mm": api_curve.get(day),
+            "verdict": (outlook.get(day) or {}).get("verdict_label"),
         }
         rows.append(row)
     while rows and all(
-        rows[-1][k] is None for k in ("precip_mm", "t_mean", "t_min", "api30_mm")
+        rows[-1][k] is None
+        for k in ("precip_mm", "t_mean", "t_min", "api30_mm", "verdict")
     ):
         rows.pop()
 
@@ -341,7 +362,7 @@ def location_view(
         "station": station,
         "history": history,
         "forecast": forecast,
-        "biological": snap.get("biological") or {},
+        "biological": biological,
         "source_status": snap.get("source_status") or {},
         "signals": [dict(s) for s in signals],
     }
@@ -466,7 +487,32 @@ def _biological_lines(view: Mapping[str, Any]) -> list[str]:
     episode = bio.get("rain_episode")
     dynamics = bio.get("api30_dynamics") or {}
     history = bio.get("history") or {}
-    out = ["биологические признаки (без автоматического вердикта):"]
+    guidance = bio.get("guidance") or {}
+    out = ["биологическая оценка (детерминированная):"]
+    out.append(
+        f"  вердикт сегодня: {guidance.get('verdict_label', 'недостаточно данных')} "
+        f"(rules v{bio.get('rules_version', '?')})"
+    )
+    out.append(f"  фаза: {guidance.get('phase_text', 'недостаточно данных')}")
+    candidate = guidance.get("candidate_high_date")
+    if candidate is None:
+        out.append("  возможная высокая вероятность: нет в горизонте прогноза")
+    else:
+        forecast_days = (view.get("forecast") or {}).get("days") or []
+        today_row = next((row for row in forecast_days if row.get("offset") == 0), None)
+        horizon = None if today_row is None else (candidate - today_row["date"]).days
+        vague = (
+            " (ориентировочно)"
+            if horizon is not None and horizon > rules_lib.VAGUE_AFTER_DAYS
+            else ""
+        )
+        out.append(f"  возможная высокая вероятность: с {_iso(candidate)}{vague}")
+    blockers = guidance.get("high_blockers") or []
+    if blockers:
+        out.append(
+            "  почему сегодня не высокая: "
+            + ", ".join(HIGH_BLOCKER_LABELS.get(str(item), str(item)) for item in blockers)
+        )
     out.append(
         f"  T средняя 7 д: {_n(temp.get('mean_c'))} °C "
         f"({temp.get('covered_days', 0)}/{temp.get('expected_days', 7)} дн., "
@@ -507,7 +553,7 @@ def _forecast_lines(view: Mapping[str, Any]) -> list[str]:
     threshold = fc.get("threshold_mm")
     out = [
         f"прогноз, сегодня + {max(len(rows) - 1, 0)} дн. "
-        "(дата | +дн | дождь мм | T ср °C | T мин °C | API30 мм):"
+        "(дата | +дн | дождь мм | T ср °C | T мин °C | API30 мм | оценка):"
     ]
     quality = str(fc.get("quality") or "missing")
     if quality in {"missing", "stale", "partial"}:
@@ -516,7 +562,7 @@ def _forecast_lines(view: Mapping[str, Any]) -> list[str]:
         out.append(
             f"  {_iso(row['date'])} {('+' + str(row['offset'])):>4}"
             f" {_n(row['precip_mm']):>7} {_n(row['t_mean']):>7} {_n(row['t_min']):>7}"
-            f" {_n(row['api30_mm']):>7}"
+            f" {_n(row['api30_mm']):>7} {row.get('verdict') or DASH}"
         )
     if not rows:
         out.append("  нет данных")

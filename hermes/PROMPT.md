@@ -1,121 +1,72 @@
-# Hermes: как подключено
+# Hermes: production contract
 
-Механика Hermes cron (проверено на сервере 2026-09-07):
-- `--script mushroom_brief.sh` — скрипт из `~/.hermes/scripts/` запускается перед агентом, его stdout (наш `brief`) вставляется в промпт. Агенту команды запускать не нужно.
-- durable notepad хранит структурированное состояние вердикта; ежедневное и пятничное задания используют независимые notepad.
-- `--continuity` остаётся дополнительным контекстом, но не является источником структурированного состояния.
-- ответ ровно `[SILENT]` подавляет доставку.
-- `delivery_outcome` в журнале Hermes является источником результата транспорта. Приложение не синхронизирует его обратно в SQLite.
-- Exactly-once не гарантируется: если доставка завершится ошибкой после обновления notepad, состояние уже будет новым.
-- время cron — локальное Europe/Prague.
+## Runtime
 
-Файлы в этой папке: `mushroom_brief.sh` (обёртка), `daily_prompt.txt` (08:30, ежедневно, с continuity), `friday_prompt.txt` (19:00 пятница, всегда). Установка:
+- `mushroom_brief.sh` runs before the agent. Its stdout is the complete input
+  for the message; the agent must not run the application a second time.
+- `daily_prompt.txt` is the daily 08:30 Europe/Prague contract. It may return
+  exactly `[SILENT]`.
+- `friday_prompt.txt` is the Friday 19:00 contract and always produces the
+  weekend report.
+- The application calculates the biological verdict, cycle phase and the
+  per-day forecast verdict. Hermes only shortens and formats them. It must not
+  promote a verdict from API30 or map values.
+- `delivery_outcome` in the Hermes run journal is the transport result.
+  Приложение не синхронизирует его обратно в SQLite.
+- Exactly-once не гарантируется. If delivery fails after the notepad update,
+  the durable state already contains the new verdict.
+
+## Durable notepad binding
+
+`cron notepad` accepts a cron job ID, not the human-readable job name. The
+current production bindings are:
+
+| Contract | Job name | Job ID |
+|---|---|---|
+| daily | `mushroom-daily` | `f28cb85d2a56` |
+| weekend | `mushroom-weekend` | `17167162fb31` |
+
+The literal IDs are intentionally present in the two prompt files. If a job
+is recreated, replace its ID in the corresponding prompt before deployment.
+The daily and weekend jobs must never read or write each other's notepad.
+
+The CLI path in production is absolute:
+
+```text
+/home/ihor.travkin/.hermes/hermes-agent/venv/bin/hermes
+```
+
+This avoids Hermes resolving `~` relative to a profile workspace.
+
+## Biological verdict v2
+
+A rain episode requires at least 20 mm over three calendar days and complete
+temperature coverage with a mean of 12–22 °C. It opens a calculated growth
+window D+7...D+12, anchored on the wettest day.
+
+Before D+7 the current verdict cannot be high, even if API30 already exceeds
+25 mm or HoubyMapa is high. High is allowed only inside the calculated window
+and additionally requires:
+
+- fresh API30 at or above 25 mm;
+- fresh forecast and a valid temperature gate;
+- sufficient precipitation history and no frost in the available seven-day
+  minimum-temperature history;
+- fresh high support from at least one of ČHMÚ map or HoubyMapa.
+
+The maps remain model evidence, not proof that mushrooms are present. Inside
+the calculated window Hermes must describe growth as possible, not as a
+confirmed wave.
+
+## Deployment note
+
+Copy the wrapper to the family profile and keep executable permissions:
 
 ```bash
-cp hermes/mushroom_brief.sh ~/.hermes/profiles/family/scripts/ && chmod 700 ~/.hermes/profiles/family/scripts/mushroom_brief.sh
-HERMES=~/.hermes/hermes-agent/venv/bin/hermes
-$HERMES --profile family cron create "30 8 * * *" "$(cat hermes/daily_prompt.txt)" --name mushroom-daily --script mushroom_brief.sh --continuity --deliver telegram:<family_chat_id>,telegram:<my_chat_id>
-$HERMES --profile family cron create "0 19 * * 5" "$(cat hermes/friday_prompt.txt)" --name mushroom-weekend --script mushroom_brief.sh --deliver telegram:<family_chat_id>,telegram:<my_chat_id>
+cp hermes/mushroom_brief.sh ~/.hermes/profiles/family/scripts/
+chmod 700 ~/.hermes/profiles/family/scripts/mushroom_brief.sh
 ```
 
-Ниже — исходный текст правил, из которого сделаны оба промпта (справочно).
-
-# Промпт для Hermes Agent: ежедневный грибной отчёт
-
-Две cron-задачи Hermes: ежедневная 08:30 Europe/Prague (к этому часу
-обновлены карта ČHMÚ, HoubyMapa и открытые данные станций) и пятничная
-19:00 — план на выходные.
-`<VENV>` заменить на реальный путь, например `/opt/mushroom-alerts/.venv`.
-
-## Ежедневная задача (08:30)
-
-```
-Запусти команду:
-  <VENV>/bin/python -m mushroom_alerts brief
-
-Это брифинг с фактами: карта ČHMÚ, HoubyMapa, станция ČHMÚ (SRA, API30,
-температуры), прогноз Open-Meteo и прогнозная кривая API30 на 16 дней,
-история за 14 дней и сработавшие детерминированные триггеры.
-Скрипт ничего не интерпретирует — интерпретация твоя.
-
-Правила интерпретации:
-- Раздел «Как читать» в конце брифа — авторитетный источник правил
-  (полосы API30, задержка 7–12 дней после дождя, температурные рамки,
-  завышенность прогноза Open-Meteo, ограничения карты ČHMÚ). Следуй ему.
-- НЕ придумывай данные. Все числа — только из брифа, дословно.
-  Если данных нет («—», «нет данных»), так и скажи, не догадывайся.
-- Прогноз дальше 7 дней — низкая уверенность, помечай словом
-  «ориентировочно».
-
-Сформируй короткое сообщение в Telegram, максимум 6 строк на локацию,
-без таблиц, эмодзи 🍄 только в заголовке. По каждой локации:
-(а) вердикт на сегодня: низкая / средняя / высокая — и одна фраза
-    почему, с числами из брифа (API30, уровень карты, дождь);
-(б) перспектива: если в пределах горизонта есть день, когда условия
-    станут хорошими, напиши «через N дней (дата)»; при N > 7 добавь,
-    что уверенность низкая;
-(в) за чем следить: ближайший дождь (сколько мм и когда).
-
-Когда отправлять — два правила, оба про изменение:
-- вердикт по любой локации сегодня отличается от вчерашнего (в любую
-  сторону: старт волны, конец волны, рост с низкой до средней);
-- прогноз впервые показывает «высокая» в пределах 7 дней (дата окна
-  появилась или сдвинулась больше чем на 2 дня).
-Иначе — молчи. Пока «высокая» держится без изменений, ежедневно не пиши:
-грибы стоят на месте 5–10 дней, а пятничный план на выходные напомнит.
-
-Память: после каждого запуска обновляй ключ `mushroom_state` в durable
-notepad задания `mushroom-daily`. Храни JSON с датой, вердиктами по
-локациям, окном, классом ошибки и версией правил. Обновляй его и при
-`[SILENT]`. Не используй notepad пятничного задания.
-
-Ошибки:
-- если в брифе есть «сбои источников» и среди них станция (chmi_station),
-  или если команда завершилась с ненулевым кодом, сообщи об этом один раз
-  и не повторяй сообщение, пока проблема не исчезнет и не появится снова;
-- сбой только карты ČHMÚ или HoubyMapa — не повод для отдельного
-  сообщения, просто упомяни одной оговоркой в обычном отчёте, если он
-  всё равно отправляется.
-```
-
-## Пятница 19:00 — план на выходные (отправлять всегда)
-
-Отдельная cron-задача Hermes, пятница 19:00 Europe/Prague. Воскресенье
-для дайджеста поздно: решение, куда ехать, принимается в пятницу.
-
-```
-Запусти команду:
-  <VENV>/bin/python -m mushroom_alerts brief
-
-Отправь короткий план на выходные, ВСЕГДА, даже если условия не менялись
-и даже если вердикт «низкая». Правила интерпретации и запрет придумывать
-данные — те же, что в ежедневной задаче. Максимум 5 строк на локацию:
-(а) вердикт на субботу и воскресенье (по прогнозу API30 и температуре
-    на эти даты из таблицы прогноза, плюс карта ČHMÚ и HoubyMapa сегодня);
-(б) какая локация и какой день лучше — одной фразой;
-(в) дождь на выходные: сколько мм и когда, стоит ли ждать мокрого леса;
-(г) если оба дня «низкая» — когда ближайшее окно (дата, ориентировочно
-    при > 7 дней), чтобы планировать следующие выходные.
-Заголовок: «🍄 Выходные DD–DD.MM».
-```
-
-## По запросу («что там с грибами?»)
-
-```
-Если пользователь спрашивает про грибы (например «что там с грибами?»,
-«стоит ехать в лес?»), запусти:
-  <VENV>/bin/python -m mushroom_alerts brief
-
-и ответь сразу, независимо от правил «когда отправлять» выше: те же
-вердикт, перспектива и ближайший дождь по каждой локации, максимум
-6 строк на локацию, числа только из брифа. Если спрашивают про конкретную
-локацию — отвечай только по ней. Правила из раздела «Как читать»
-действуют так же.
-```
-
-## Запасной детерминированный вариант
-
-`brief` не заменяет контракт `check` (PLAN §2): `<VENV>/bin/python -m
-mushroom_alerts check` по-прежнему возвращает `10` при положительном
-сигнале, `0` при молчании и `1` при ошибке, и его stdout можно пересылать
-как есть, без участия LLM. Использовать, если интерпретация недоступна.
+Prompt updates are applied to the existing jobs by the server deployment
+procedure. Creating new jobs is deliberately not documented here because the
+new IDs must first be bound into the corresponding prompt files.

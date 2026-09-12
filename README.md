@@ -148,6 +148,14 @@ failures are soft by design.
   `forecast_points` tables. Legacy `forecasts` remains dual-written for
   rollback compatibility. Metrics in one view always come from one release.
 - SQLite migrations use `PRAGMA user_version`; current schema version is 2.
+- The application, not Hermes, calculates the conservative biological
+  verdict. A qualifying rain episode starts a D+7...D+12 growth window;
+  moisture above the API30 threshold before D+7 can produce at most a
+  medium verdict. High additionally requires fresh API30 and forecast data,
+  a valid temperature gate, sufficient history without frost, and fresh
+  high support from at least one map.
 - Hermes keeps daily and Friday verdicts in independent durable notepads.
+  The prompt must address the notepad by the actual cron job ID, not by the
+  human-readable job name.
   Transport results remain in Hermes `delivery_outcome`; they are not copied
   into the application database. Exactly-once delivery is not guaranteed.

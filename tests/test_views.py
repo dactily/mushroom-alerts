@@ -101,7 +101,7 @@ def test_partial_location_failure_is_visible_in_shared_view(tmp_path):
     }
 
 
-def test_biological_features_are_facts_not_a_verdict(tmp_path):
+def test_biological_features_include_conservative_guidance(tmp_path):
     readings = []
     for offset in range(-30, 1):
         day = TODAY + timedelta(days=offset)
@@ -129,4 +129,165 @@ def test_biological_features_are_facts_not_a_verdict(tmp_path):
     ]
     assert bio["api30_dynamics"]["delta_3d_mm"] == 3.0
     assert bio["history"]["sufficient"] is True
-    assert "verdict" not in bio
+    assert bio["guidance"]["verdict"] == "medium"
+    assert bio["guidance"]["phase"] == "waiting"
+
+
+def test_rain_does_not_become_high_before_growth_window(tmp_path):
+    readings = []
+    rain = {-3: 9.2, -2: 2.0, -1: 14.6}
+    for offset in range(-30, 1):
+        day = TODAY + timedelta(days=offset)
+        readings += [
+            Reading("chmi_station", VALMEZ.slug, day, "sra_mm", rain.get(offset, 0.0)),
+            Reading("chmi_station", VALMEZ.slug, day, "t_mean", 15.0),
+        ]
+        if offset >= -6:
+            readings.append(
+                Reading("chmi_station", VALMEZ.slug, day, "t_min", 8.0)
+            )
+    maps = [
+        Reading("chmi_map", VALMEZ.slug, TODAY, "level", 3.0),
+        Reading("houbymapa", VALMEZ.slug, TODAY, "level", 4.0),
+        Reading("houbymapa", VALMEZ.slug, TODAY, "score", 0.70),
+    ]
+    api_curve = [
+        Reading(
+            "api30_forecast",
+            VALMEZ.slug,
+            TODAY + timedelta(days=offset),
+            "api30_mm",
+            35.0,
+            meta={
+                "quality": "fresh",
+                **({"issued": TODAY.isoformat()} if offset > 0 else {}),
+            },
+        )
+        for offset in range(13)
+    ]
+    temperatures = []
+    for offset in range(13):
+        meta = {"issued": TODAY.isoformat()}
+        temperatures += [
+            Reading(
+                "openmeteo",
+                VALMEZ.slug,
+                TODAY + timedelta(days=offset),
+                "t_mean",
+                14.0,
+                meta=meta,
+            ),
+            Reading(
+                "openmeteo",
+                VALMEZ.slug,
+                TODAY + timedelta(days=offset),
+                "t_min",
+                7.0,
+                meta=meta,
+            ),
+        ]
+
+    with Store(tmp_path / "state.sqlite") as store:
+        store.upsert_readings(readings + maps, retrieved_at=stamp(5))
+        store.upsert_readings(temperatures, retrieved_at=stamp(6))
+        store.upsert_readings(api_curve, retrieved_at=stamp(7))
+        bio = location_snapshot(store, VALMEZ, TODAY)["biological"]
+
+    assert bio["rain_episode"]["total_mm"] == 25.8
+    assert bio["rain_episode"]["date"] == TODAY - timedelta(days=1)
+    assert bio["rain_episode"]["growth_window"] == [
+        TODAY + timedelta(days=6),
+        TODAY + timedelta(days=11),
+    ]
+    guidance = bio["guidance"]
+    assert guidance["verdict"] == "medium"
+    assert guidance["phase"] == "waiting"
+    assert guidance["candidate_high_date"] == TODAY + timedelta(days=6)
+    assert "growth_window_not_started" in guidance["high_blockers"]
+    assert guidance["outlook"][0]["verdict"] == "medium"
+    assert next(
+        row for row in guidance["outlook"] if row["date"] == TODAY + timedelta(days=6)
+    )["verdict"] == "high"
+
+
+def test_high_requires_an_active_growth_window(tmp_path):
+    readings = []
+    for offset in range(-30, 1):
+        day = TODAY + timedelta(days=offset)
+        readings += [
+            Reading(
+                "chmi_station",
+                VALMEZ.slug,
+                day,
+                "sra_mm",
+                22.0 if offset == -7 else 0.0,
+            ),
+            Reading("chmi_station", VALMEZ.slug, day, "t_mean", 15.0),
+        ]
+        if offset >= -6:
+            readings.append(
+                Reading("chmi_station", VALMEZ.slug, day, "t_min", 8.0)
+            )
+    maps = [Reading("houbymapa", VALMEZ.slug, TODAY, "level", 4.0)]
+    api_curve = [
+        Reading(
+            "api30_forecast",
+            VALMEZ.slug,
+            TODAY,
+            "api30_mm",
+            30.0,
+            meta={"quality": "fresh"},
+        )
+    ]
+    temperatures = [
+        Reading(
+            "openmeteo",
+            VALMEZ.slug,
+            TODAY,
+            metric,
+            value,
+            meta={"issued": TODAY.isoformat()},
+        )
+        for metric, value in (("t_mean", 14.0), ("t_min", 7.0))
+    ]
+
+    with Store(tmp_path / "state.sqlite") as store:
+        store.upsert_readings(readings + maps, retrieved_at=stamp(5))
+        store.upsert_readings(temperatures, retrieved_at=stamp(6))
+        store.upsert_readings(api_curve, retrieved_at=stamp(7))
+        guidance = location_snapshot(store, VALMEZ, TODAY)["biological"]["guidance"]
+
+    assert guidance["phase"] == "growth_window"
+    assert guidance["verdict"] == "high"
+    assert guidance["high_blockers"] == []
+
+
+def test_rain_episode_requires_complete_temperature_window(tmp_path):
+    readings = [
+        Reading(
+            "chmi_station",
+            VALMEZ.slug,
+            TODAY + timedelta(days=offset),
+            "sra_mm",
+            10.0,
+        )
+        for offset in (-2, -1, 0)
+    ]
+    readings += [
+        Reading(
+            "chmi_station",
+            VALMEZ.slug,
+            TODAY + timedelta(days=offset),
+            "t_mean",
+            15.0,
+        )
+        for offset in (-2, -1)
+    ]
+
+    with Store(tmp_path / "state.sqlite") as store:
+        store.upsert_readings(readings, retrieved_at=stamp(5))
+        bio = location_snapshot(store, VALMEZ, TODAY)["biological"]
+
+    assert bio["rain_episode"] is None
+    assert bio["guidance"]["verdict"] == "insufficient"
+    assert "no_qualified_rain_episode" in bio["guidance"]["high_blockers"]

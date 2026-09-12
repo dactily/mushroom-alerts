@@ -146,8 +146,21 @@ def _biological_features(
     for end in sorted(sra_points, reverse=True):
         if end > today:
             continue
-        aggregate = calendar_window(sra_points, end, policy.RAIN_EPISODE_DAYS)
-        if aggregate.total is None or aggregate.total < policy.RAIN_EPISODE_MM:
+        rain = calendar_window(sra_points, end, policy.RAIN_EPISODE_DAYS)
+        temperature_during_rain = calendar_window(
+            t_points, end, policy.RAIN_EPISODE_DAYS
+        )
+        if rain.total is None or rain.total < policy.RAIN_EPISODE_MM:
+            continue
+        if rain.quality in {DataQuality.MISSING, DataQuality.STALE}:
+            continue
+        if not temperature_during_rain.complete:
+            continue
+        if temperature_during_rain.mean is None or not (
+            policy.RAIN_T_MEAN_MIN
+            <= temperature_during_rain.mean
+            <= policy.RAIN_T_MEAN_MAX
+        ):
             continue
         first = end - timedelta(days=policy.RAIN_EPISODE_DAYS - 1)
         episode_days = [day for day in sra_points if first <= day <= end]
@@ -156,11 +169,15 @@ def _biological_features(
         anchor = max(episode_days, key=lambda day: float(sra_points[day].value))
         rain_episode = {
             "date": anchor,
-            "total_mm": round(aggregate.total, 1),
-            "covered_days": aggregate.covered_days,
-            "expected_days": aggregate.expected_days,
-            "quality": aggregate.quality.value,
-            "lower_bound": aggregate.lower_bound,
+            "start": first,
+            "end": end,
+            "total_mm": round(rain.total, 1),
+            "covered_days": rain.covered_days,
+            "expected_days": rain.expected_days,
+            "quality": rain.quality.value,
+            "lower_bound": rain.lower_bound,
+            "temperature_mean_c": round(temperature_during_rain.mean, 1),
+            "temperature_covered_days": temperature_during_rain.covered_days,
             "growth_window": [
                 anchor + timedelta(days=policy.GROWTH_WINDOW_FROM_DAYS),
                 anchor + timedelta(days=policy.GROWTH_WINDOW_TO_DAYS),
@@ -215,6 +232,125 @@ def _biological_features(
                 and history.quality not in {DataQuality.MISSING, DataQuality.STALE}
             ),
         },
+    }
+
+
+def _fresh_high_map(block: dict[str, Any] | None) -> bool:
+    if not block or block.get("quality") != DataQuality.FRESH.value:
+        return False
+    level = block.get("level")
+    return level is not None and float(level) >= policy.BIOLOGICAL_MAP_LEVEL
+
+
+def _biological_guidance(
+    today: date,
+    biological: dict[str, Any],
+    forecast: dict[str, Any],
+    chmi: dict[str, Any] | None,
+    houbymapa: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Conservative verdict: moisture is not evidence of instant fruiting."""
+    episode = biological.get("rain_episode")
+    history = biological.get("history") or {}
+    frost = biological.get("frost") or {}
+    map_high = _fresh_high_map(chmi) or _fresh_high_map(houbymapa)
+
+    phase = "no_episode"
+    phase_text = "подтверждённый дождевой эпизод не найден"
+    growth_start = None
+    growth_end = None
+    if episode:
+        growth_start, growth_end = episode["growth_window"]
+        anchor = episode["date"]
+        if today < growth_start:
+            phase = "waiting"
+            phase_text = (
+                f"дождь прошёл {anchor.isoformat()}, ждём роста с "
+                f"{growth_start.isoformat()}"
+            )
+        elif today <= growth_end:
+            phase = "growth_window"
+            phase_text = (
+                f"расчётное окно роста {growth_start.isoformat()}–"
+                f"{growth_end.isoformat()}; наличие грибов требует подтверждения"
+            )
+        else:
+            phase = "after_window"
+            phase_text = f"расчётное окно после дождя закончилось {growth_end.isoformat()}"
+
+    api_curve = dict(forecast.get("curve") or [])
+    api_qualities = forecast.get("api30_quality_by_date") or {}
+    t_mean = forecast.get("t_mean") or {}
+    t_min = forecast.get("t_min") or {}
+    forecast_fresh = forecast.get("openmeteo_quality") == DataQuality.FRESH.value
+    frost_known = frost.get("covered_days", 0) >= frost.get("expected_days", 7)
+    no_frost = frost_known and not frost.get("present", False)
+    history_sufficient = bool(history.get("sufficient"))
+
+    def high_blockers(day: date) -> list[str]:
+        blockers: list[str] = []
+        if growth_start is None or growth_end is None:
+            blockers.append("no_qualified_rain_episode")
+        elif day < growth_start:
+            blockers.append("growth_window_not_started")
+        elif day > growth_end:
+            blockers.append("growth_window_finished")
+        api_value = api_curve.get(day)
+        if api_qualities.get(day) != DataQuality.FRESH.value:
+            blockers.append("api30_not_fresh")
+        elif api_value is None or api_value < forecast.get(
+            "threshold_mm", policy.API30_THRESHOLD_MM
+        ):
+            blockers.append("api30_below_threshold")
+        if not forecast_fresh:
+            blockers.append("forecast_not_fresh")
+        elif not api30_lib.temp_ok(t_mean.get(day), t_min.get(day)):
+            blockers.append("temperature_gate_failed")
+        if not history_sufficient:
+            blockers.append("history_insufficient")
+        if not no_frost:
+            blockers.append("frost_or_incomplete_frost_history")
+        if not map_high:
+            blockers.append("no_fresh_high_map_support")
+        return blockers
+
+    def verdict_on(day: date) -> tuple[str, list[str]]:
+        blockers = high_blockers(day)
+        if not blockers:
+            return "high", blockers
+        if episode and growth_start is not None and day <= growth_end:
+            return "medium", blockers
+        if map_high:
+            return "medium", blockers
+        usable_sources = any(
+            block and block.get("quality") == DataQuality.FRESH.value
+            for block in (chmi, houbymapa)
+        ) or api_qualities.get(today) == DataQuality.FRESH.value
+        return ("low" if usable_sources else "insufficient"), blockers
+
+    verdict, blockers = verdict_on(today)
+    outlook = []
+    for day in sorted(day for day in api_curve if day >= today):
+        day_verdict, day_blockers = verdict_on(day)
+        outlook.append(
+            {
+                "date": day,
+                "verdict": day_verdict,
+                "verdict_label": policy.BIOLOGICAL_VERDICT_LABELS[day_verdict],
+                "high_blockers": day_blockers,
+            }
+        )
+    candidate = next(
+        (row["date"] for row in outlook if row["verdict"] == "high"), None
+    )
+    return {
+        "verdict": verdict,
+        "verdict_label": policy.BIOLOGICAL_VERDICT_LABELS[verdict],
+        "phase": phase,
+        "phase_text": phase_text,
+        "candidate_high_date": candidate,
+        "high_blockers": blockers,
+        "outlook": outlook,
     }
 
 
@@ -385,5 +521,8 @@ def location_snapshot(
         source: status.get("quality", DataQuality.MISSING.value)
         for source, status in out["source_status"].items()
     }
+    biological["guidance"] = _biological_guidance(
+        today, biological, forecast, out["chmi"], out["houbymapa"]
+    )
     out["biological"] = biological
     return out

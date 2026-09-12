@@ -157,7 +157,9 @@ def test_render_has_every_section(tmp_path):
     assert "температура за" in text and "средняя" in text
     assert "температура почвы: 5 см 17.6 °C, 10 см 17.7 °C" in text
     assert "влажность: 81 %" in text
-    assert "биологические признаки (без автоматического вердикта):" in text
+    assert "биологическая оценка (детерминированная):" in text
+    assert "вердикт сегодня: средняя (rules v2)" in text
+    assert "возможная высокая вероятность:" in text
     assert "T средняя 7 д:" in text and "динамика API30:" in text
 
     # history table: one line per day, 14 of them
@@ -167,6 +169,7 @@ def test_render_has_every_section(tmp_path):
 
     # forecast table plus the derived API30 curve
     assert "прогноз, сегодня + 16 дн." in text
+    assert "API30 мм | оценка" in text
     assert (TODAY + timedelta(days=15)).isoformat() in text
     cross = (TODAY + timedelta(days=4)).isoformat()
     assert f"порог API30 25 мм: пересечение {cross} (через 4 дн.)" in text
