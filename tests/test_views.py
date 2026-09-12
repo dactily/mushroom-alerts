@@ -347,3 +347,103 @@ def test_rain_episode_requires_complete_temperature_window(tmp_path):
     assert bio["rain_episode"] is None
     assert bio["guidance"]["verdict"] == "insufficient"
     assert "no_qualified_rain_episode" in bio["guidance"]["high_blockers"]
+
+
+# ----------------------------------------------------------------------
+# the comparable chance (PLAN §9b)
+# ----------------------------------------------------------------------
+def _primary_window_readings(*, station_until: int = 0) -> list[Reading]:
+    """A wet spell eight days ago: today sits inside D+7...D+12."""
+    readings = []
+    for offset in range(-30, station_until + 1):
+        day = TODAY + timedelta(days=offset)
+        readings += [
+            Reading(
+                "chmi_station",
+                VALMEZ.slug,
+                day,
+                "sra_mm",
+                22.0 if offset == -8 else 0.0,
+            ),
+            Reading("chmi_station", VALMEZ.slug, day, "t_mean", 15.0),
+        ]
+        if offset >= -7:
+            readings.append(Reading("chmi_station", VALMEZ.slug, day, "t_min", 8.0))
+    return readings
+
+
+def test_the_snapshot_carries_a_chance_next_to_the_verdict(tmp_path):
+    maps = [
+        Reading("chmi_map", VALMEZ.slug, TODAY, "level", 3.0),
+        Reading("houbymapa", VALMEZ.slug, TODAY, "level", 4.0),
+        Reading("houbymapa", VALMEZ.slug, TODAY, "score", 0.90),
+    ]
+    api_curve = [
+        Reading(
+            "api30_forecast",
+            VALMEZ.slug,
+            TODAY + timedelta(days=offset),
+            "api30_mm",
+            30.0,
+            meta={
+                "quality": "fresh",
+                **({"issued": TODAY.isoformat()} if offset else {}),
+            },
+        )
+        for offset in (0, 1)
+    ]
+    temperatures = [
+        Reading(
+            "openmeteo",
+            VALMEZ.slug,
+            TODAY + timedelta(days=offset),
+            metric,
+            value,
+            meta={"issued": TODAY.isoformat()} if offset else None,
+        )
+        for offset in (0, 1)
+        for metric, value in (("t_mean", 14.0), ("t_min", 7.0))
+    ]
+
+    with Store(tmp_path / "state.sqlite") as store:
+        store.upsert_readings(_primary_window_readings() + maps, retrieved_at=stamp(5))
+        store.upsert_readings(temperatures, retrieved_at=stamp(6))
+        store.upsert_readings(api_curve, retrieved_at=stamp(7))
+        bio = location_snapshot(store, VALMEZ, TODAY)["biological"]
+
+    chance = bio["chance"]
+    # 0.60 x 1.15 (API30 30 mm) x 1.12 (HoubyMapa 0.90) x 0.90 (ČHMÚ 3) = 69.6 %
+    assert chance["today"] == 70
+    # the maps are today-only, so tomorrow is the bare 0.60 x 1.15 = 69 %
+    assert chance["curve"][TODAY + timedelta(days=1)] == 70
+    assert chance["peak"] == (TODAY, 70)
+    assert chance["capped"] is False
+    assert bio["guidance"]["verdict"] == "high"  # the verdict is untouched
+
+
+def test_a_stale_station_caps_the_chance(tmp_path):
+    api_curve = [
+        Reading(
+            "api30_forecast", VALMEZ.slug, TODAY, "api30_mm", 30.0,
+            meta={"quality": "fresh"},
+        )
+    ]
+    temperatures = [
+        Reading("openmeteo", VALMEZ.slug, TODAY, metric, value)
+        for metric, value in (("t_mean", 14.0), ("t_min", 7.0))
+    ]
+    with Store(tmp_path / "state.sqlite") as store:
+        store.upsert_readings(
+            _primary_window_readings(station_until=-3), retrieved_at=stamp(5)
+        )
+        store.upsert_readings(temperatures, retrieved_at=stamp(6))
+        store.upsert_readings(api_curve, retrieved_at=stamp(7))
+        snap = location_snapshot(store, VALMEZ, TODAY)
+
+    assert snap["source_status"]["chmi_station"]["quality"] == "stale"
+    assert snap["biological"]["chance"] == {
+        "today": 50,
+        "curve": {TODAY: 50},
+        "peak": (TODAY, 50),
+        "capped": True,
+    }

@@ -7,14 +7,24 @@ Hermes Agent used to read it, apply the biology cheat sheet, compare today
 against a durable notepad, and decide whether to write to Telegram at all.
 All of that is deterministic work, so it belongs here:
 
-* the verdicts, the phase and the outlook come out of the shared read model
-  (``views``/``biology``) exactly as ``brief`` shows them;
+* the numbers, the phase and the caveats come out of the shared read model
+  (``views``/``biology``/``chance``) exactly as ``brief`` shows them;
 * the send/silent decision is taken against the previous report stored in
   SQLite (``reports``), not against an agent's memory;
 * the result is one short Russian block, already worded for a human.
 
 The agent only obeys ``ОТПРАВЛЯТЬ`` and re-wraps the block as a Telegram
 message.  It adds no number, no date and no interpretation.
+
+What the block says (PLAN §9)
+-----------------------------
+The user watches up to twenty forests within 50 km and decides for himself
+where to drive: he knows which road is easy and where he has found things
+before, and the script knows none of that.  So the block is a list of
+"location — chance, %" **in the order of** ``locations.yaml``, never
+sorted, never advising.  The single place where the script does order
+something is picking the two locations that get a technical line under
+``ПОДРОБНО``.
 """
 
 from __future__ import annotations
@@ -33,7 +43,7 @@ __all__ = [
     "DAILY",
     "WEEKEND",
     "NEAR_DAYS",
-    "SHIFT_DAYS",
+    "DETAIL_LOCATIONS",
     "error_class_of",
     "summarize",
     "decide",
@@ -46,16 +56,19 @@ DAILY = "daily"
 WEEKEND = "weekend"
 MODES = (DAILY, WEEKEND)
 
-#: A candidate high-probability date this close counts as "почти сейчас".
+#: Past this horizon the forecast is a guess and the block says so.
 NEAR_DAYS = 7
 
-#: A candidate date moving more than this many days is news.
-SHIFT_DAYS = 2
+#: How many locations get a technical line.  Two keeps the block readable
+#: whether the user watches two forests or twenty.
+DETAIL_LOCATIONS = 2
 
-#: Long location names do not fit a one-line summary.
-SHORT_NAMES = {"valmez": "Valmez", "valasska-bystrice": "Bystřice"}
+#: Above this many, a caveat counts locations instead of naming them.
+CAVEAT_NAMES = 3
 
-VERDICT_RANK = {"insufficient": 0, "low": 1, "medium": 2, "high": 3}
+#: ``ПРИЧИНА`` is a diagnostic line, never shown to the human; with twenty
+#: locations it must still not outgrow the block it explains.
+REASON_ITEMS = 4
 
 _PHASE_RANK = {
     "no_episode": 0,
@@ -92,8 +105,17 @@ def _level(value: float | None) -> str | None:
     return None if value is None else f"{value:.0f}/5"
 
 
-def short_name(slug: str, name: str) -> str:
-    return SHORT_NAMES.get(slug) or name.split()[-1]
+def _pct(value: int | None) -> str:
+    return "нет данных" if value is None else f"{value} %"
+
+
+def _as_date(value: Any) -> date | None:
+    if isinstance(value, date):
+        return value
+    try:
+        return date.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return None
 
 
 def _weekend_days(today: date) -> tuple[date, date]:
@@ -106,22 +128,21 @@ def _weekend_days(today: date) -> tuple[date, date]:
     return saturday, saturday + timedelta(days=1)
 
 
-def _days(count: int) -> str:
-    """``1 день`` / ``3 дня`` / ``6 дней`` -- the block is read by a human."""
-    tail = abs(count) % 100
-    if 11 <= tail <= 14:
-        return f"{count} дней"
-    tail %= 10
-    if tail == 1:
-        return f"{count} день"
-    if 2 <= tail <= 4:
-        return f"{count} дня"
-    return f"{count} дней"
-
-
 def _vague(days: int | None) -> str:
     """Past a week the forecast is not trustworthy -- say so, every time."""
     return " (ориентировочно)" if days is not None and days > NEAR_DAYS else ""
+
+
+def _locations_word(count: int) -> str:
+    tail = abs(count) % 100
+    if 11 <= tail <= 14:
+        return "локаций"
+    tail %= 10
+    if tail == 1:
+        return "локация"
+    if 2 <= tail <= 4:
+        return "локации"
+    return "локаций"
 
 
 # ----------------------------------------------------------------------
@@ -157,6 +178,7 @@ def _location_summary(
 ) -> dict[str, Any]:
     bio = view.get("biological") or {}
     guidance = bio.get("guidance") or {}
+    chance = bio.get("chance") or {}
     station = view.get("station") or {}
     forecast = view.get("forecast") or {}
     chmi = view.get("chmi") or {}
@@ -166,34 +188,48 @@ def _location_summary(
     if api30 is None:
         api30 = forecast.get("today_mm")
 
-    candidate = guidance.get("candidate_high_date")
-    if isinstance(candidate, str):
-        candidate = date.fromisoformat(candidate)
+    candidate = _as_date(guidance.get("candidate_high_date"))
+
+    curve = {
+        day: int(value)
+        for raw, value in (chance.get("curve") or {}).items()
+        if value is not None and (day := _as_date(raw)) is not None
+    }
+    peak_raw = chance.get("peak")
+    peak = (
+        None
+        if not peak_raw
+        else (_as_date(peak_raw[0]), None if peak_raw[1] is None else int(peak_raw[1]))
+    )
+    today_chance = None if chance.get("today") is None else int(chance["today"])
 
     rows = {row["date"]: row for row in forecast.get("days") or []}
-    weekend_verdicts = [
+    weekend_days = [
         {
             "date": day,
             "label": WEEKDAY_NAMES[index],
+            "chance": curve.get(day),
             "verdict_label": (rows.get(day) or {}).get("verdict")
             or policy.BIOLOGICAL_VERDICT_LABELS["insufficient"],
-            "precip_mm": (rows.get(day) or {}).get("precip_mm"),
         }
         for index, day in enumerate(weekend)
     ]
 
-    next_rain = forecast.get("next_rain")
     episode = bio.get("rain_episode") or {}
     growth = episode.get("growth_window") or [None, None]
 
     return {
         "slug": view["slug"],
         "name": view["name"],
-        "short_name": short_name(str(view["slug"]), str(view["name"])),
+        "short_name": str(view.get("short_name") or view["name"]),
         "verdict": guidance.get("verdict", "insufficient"),
         "verdict_label": guidance.get(
             "verdict_label", policy.BIOLOGICAL_VERDICT_LABELS["insufficient"]
         ),
+        "chance": today_chance,
+        "chance_curve": curve,
+        "chance_peak": peak,
+        "chance_capped": bool(chance.get("capped")),
         "phase": guidance.get("phase", "no_episode"),
         "event_id": guidance.get("dominant_event_id"),
         "episode": {
@@ -207,25 +243,15 @@ def _location_summary(
         "houbymapa_score": houby.get("score"),
         "rain_7d_mm": _window_mm(station, 7),
         "candidate_high_date": candidate,
-        "candidate_in_days": None if candidate is None else (candidate - today).days,
-        "next_rain": next_rain,
-        "weekend": weekend_verdicts,
-        "weekend_rain_mm": (
-            None
-            if all(item["precip_mm"] is None for item in weekend_verdicts)
-            else sum(item["precip_mm"] or 0.0 for item in weekend_verdicts)
-        ),
-        "horizon_days": max(len(rows) - 1, 0),
+        "next_rain": forecast.get("next_rain"),
+        "weekend": weekend_days,
     }
 
 
-def _phase_sentence(summaries: Sequence[Mapping[str, Any]]) -> str:
-    """One plain sentence for the whole report: the strongest phase wins."""
-    if not summaries:
-        return "данных нет"
-    best = max(summaries, key=lambda item: _PHASE_RANK.get(item["phase"], 0))
-    phase = best["phase"]
-    episode = best.get("episode") or {}
+def _phase_sentence(item: Mapping[str, Any]) -> str:
+    """One plain sentence about the rain cycle of one location."""
+    phase = item["phase"]
+    episode = item.get("episode") or {}
     if phase == "waiting":
         return (
             f"дождь прошёл {_dm(episode.get('anchor'))}, "
@@ -243,10 +269,31 @@ def _phase_sentence(summaries: Sequence[Mapping[str, Any]]) -> str:
     return "подходящего дождя не было"
 
 
+def _headline_phase(summaries: Sequence[Mapping[str, Any]]) -> str:
+    """The strongest phase across locations -- one line for the whole block."""
+    if not summaries:
+        return "данных нет"
+    return _phase_sentence(max(summaries, key=lambda item: _PHASE_RANK.get(item["phase"], 0)))
+
+
 def _caveats(
-    notes: Sequence[str], failed_sources: Sequence[str], error_class: str
+    summaries: Sequence[Mapping[str, Any]],
+    notes: Sequence[str],
+    failed_sources: Sequence[str],
+    error_class: str,
 ) -> str:
     words = [SOURCE_WORDS.get(source, f"{source}: нет данных") for source in failed_sources]
+    capped = [item["short_name"] for item in summaries if item["chance_capped"]]
+    if capped:
+        # Naming twenty locations would be longer than the list itself.
+        who = (
+            ", ".join(capped)
+            if len(capped) <= CAVEAT_NAMES
+            else f"{len(capped)} {_locations_word(len(capped))}"
+        )
+        words.append(
+            f"без свежей станции шанс ограничен {policy.CHANCE_NO_STATION_CAP} %: {who}"
+        )
     if error_class == "brief" and not words:
         words.append("бриф не собрался")
     if not words and notes:
@@ -262,7 +309,11 @@ def summarize(
     calculation_error: str | None = None,
     all_failed: bool = False,
 ) -> dict[str, Any]:
-    """Everything the block prints, computed once, in the script."""
+    """Everything the block prints, computed once, in the script.
+
+    The location order is the order of ``brief["locations"]``, which is the
+    order of ``locations.yaml``.  Nothing in here sorts it.
+    """
     if mode not in MODES:
         raise ValueError(f"unknown report mode: {mode}")
     weekend = _weekend_days(today)
@@ -284,12 +335,12 @@ def summarize(
         "date": today,
         "weekend": list(weekend),
         "locations": summaries,
-        "phase_text": _phase_sentence(summaries),
+        "phase_text": _headline_phase(summaries),
         "earliest_candidate": min(candidates) if candidates else None,
         "error_class": klass,
         "rules_version": policy.RULES_VERSION,
         "caveats": _caveats(
-            brief.get("notes") or (), failed_sources, klass
+            summaries, brief.get("notes") or (), failed_sources, klass
         ),
     }
 
@@ -297,6 +348,7 @@ def summarize(
 def state_of(summary: Mapping[str, Any]) -> dict[str, Any]:
     """The part of a report that the next run compares itself against."""
     return {
+        "chances": {item["slug"]: item["chance"] for item in summary["locations"]},
         "verdicts": {item["slug"]: item["verdict"] for item in summary["locations"]},
         "candidates": {
             item["slug"]: (
@@ -315,38 +367,39 @@ def state_of(summary: Mapping[str, Any]) -> dict[str, Any]:
 # ----------------------------------------------------------------------
 # the send / silent decision
 # ----------------------------------------------------------------------
-def _candidate_reason(
-    slug_name: str,
-    previous_iso: str | None,
-    previous_date: date,
-    current: date | None,
-    today: date,
-) -> str | None:
-    previous = None if not previous_iso else date.fromisoformat(str(previous_iso))
-    previous_horizon = None if previous is None else (previous - previous_date).days
-    horizon = None if current is None else (current - today).days
-    if horizon is not None and horizon <= NEAR_DAYS and (
-        previous_horizon is None or previous_horizon > NEAR_DAYS
-    ):
-        return f"{slug_name}: высокая вероятность вошла в ближайшие {_days(NEAR_DAYS)}"
-    if previous_horizon is not None and previous_horizon <= NEAR_DAYS and horizon is None:
-        return f"{slug_name}: окно высокой вероятности пропало из прогноза"
-    if (
-        previous is not None
-        and current is not None
-        and abs((current - previous).days) > SHIFT_DAYS
-    ):
-        return f"{slug_name}: дата окна сдвинулась на {_days(abs((current - previous).days))}"
-    return None
+def _best(chances: Mapping[str, Any]) -> int | None:
+    values = [int(value) for value in chances.values() if value is not None]
+    return max(values) if values else None
 
 
-def decide(
-    store: Store, summary: Mapping[str, Any]
-) -> tuple[bool, str]:
-    """Two rules, both about change (PLAN §3); the weekend plan always goes.
+def _reason(reasons: Sequence[str]) -> str:
+    if len(reasons) <= REASON_ITEMS:
+        return "; ".join(reasons)
+    return "; ".join(reasons[:REASON_ITEMS]) + f"; ещё изменений: {len(reasons) - REASON_ITEMS}"
 
-    The comparison is always against the last report from an *earlier* date,
-    so running the same mode twice on one day yields the same answer.
+
+def _crossing_reason(previous: int | None, current: int | None) -> str | None:
+    """The best chance crossing :data:`policy.CHANCE_ALERT_PCT` is news."""
+    threshold = policy.CHANCE_ALERT_PCT
+    was = previous is not None and previous >= threshold
+    now = current is not None and current >= threshold
+    if was == now:
+        return None
+    if now:
+        return f"лучший шанс {current} %, выше {threshold} %"
+    return f"лучший шанс упал до {_pct(current)}, ниже {threshold} %"
+
+
+def decide(store: Store, summary: Mapping[str, Any]) -> tuple[bool, str]:
+    """Send when the numbers moved (PLAN §9d); the weekend plan always goes.
+
+    With twenty locations the old "any verdict changed" rule fired almost
+    every day, because a verdict is a coarse word.  A percentage moves
+    smoothly, so the rule is about the size of the move: ten points
+    anywhere, or the best location crossing 60 % in either direction.
+
+    The comparison is always against the last report from an *earlier*
+    date, so running the same mode twice on one day yields the same answer.
     """
     mode = str(summary["mode"])
     today: date = summary["date"]
@@ -361,34 +414,25 @@ def decide(
     if previous is None:
         return True, "первый запуск, предыдущего отчёта нет"
 
-    previous_date = date.fromisoformat(str(previous["date"]))
-    old_verdicts = json.loads(previous["verdicts_json"] or "{}")
-    old_candidates = json.loads(previous["candidates_json"] or "{}")
+    old_chances = json.loads(previous["chances_json"] or "{}")
     reasons: list[str] = []
 
     for item in summary["locations"]:
-        slug = item["slug"]
         name = item["short_name"]
-        before = old_verdicts.get(slug)
-        now = state["verdicts"][slug]
-        if before is not None and before != now:
-            reasons.append(
-                f"{name}: вердикт {policy.BIOLOGICAL_VERDICT_LABELS.get(before, before)}"
-                f" → {policy.BIOLOGICAL_VERDICT_LABELS.get(now, now)}"
-            )
-        elif before is None:
-            reasons.append(f"{name}: новая локация")
+        now = state["chances"][item["slug"]]
+        before = old_chances.get(item["slug"])
+        if before is None:
+            if now is not None:
+                reasons.append(f"{name}: новая локация, шанс {now} %")
+            continue
+        if now is None:
+            reasons.append(f"{name}: шанс больше не считается")
+        elif abs(now - int(before)) >= policy.CHANCE_MOVE_PCT:
+            reasons.append(f"{name}: шанс {int(before)} % → {now} %")
 
-    for item in summary["locations"]:
-        reason = _candidate_reason(
-            item["short_name"],
-            old_candidates.get(item["slug"]),
-            previous_date,
-            item["candidate_high_date"],
-            today,
-        )
-        if reason:
-            reasons.append(reason)
+    crossing = _crossing_reason(_best(old_chances), _best(state["chances"]))
+    if crossing:
+        reasons.append(crossing)
 
     if str(previous["error_class"]) != state["error_class"]:
         if state["error_class"] == "none":
@@ -400,7 +444,7 @@ def decide(
             )
 
     if reasons:
-        return True, "; ".join(reasons)
+        return True, _reason(reasons)
     return False, "ничего не изменилось с прошлого отчёта"
 
 
@@ -418,122 +462,98 @@ def _header(summary: Mapping[str, Any]) -> str:
     return f"🍄 Грибной прогноз: {_dm(summary['date'])}"
 
 
-def _outlook_tail(summary: Mapping[str, Any]) -> str:
-    candidate = summary["earliest_candidate"]
-    if candidate is None:
-        return "окна в горизонте нет"
-    days = (candidate - summary["date"]).days
-    return f"высокая ожидается с {_dm(candidate)}{_vague(days)}"
-
-
-def _best_weekend(summary: Mapping[str, Any]) -> str:
-    """Name a best day only when one is actually better than the rest."""
-    scored = [
-        (
-            VERDICT_RANK.get(_code_of(day["verdict_label"]), 0),
-            item["short_name"],
-            "суббота" if index == 0 else "воскресенье",
-        )
-        for item in summary["locations"]
-        for index, day in enumerate(item["weekend"])
-    ]
-    if not scored:
-        return "лучшего дня нет: данных нет"
-    top = max(rank for rank, _, _ in scored)
-    if top <= VERDICT_RANK["low"]:
-        return "лучшего дня нет, везде слабо"
-    leaders = [entry for entry in scored if entry[0] == top]
-    if len(leaders) == len(scored):
-        return "оба дня и обе локации одинаковы"
-    if len(leaders) > 1:
-        return "лучше: " + ", ".join(f"{name} ({day})" for _, name, day in leaders)
-    return f"лучше: {leaders[0][1]}, {leaders[0][2]}"
-
-
-def _code_of(label: str) -> str:
-    for code, text in policy.BIOLOGICAL_VERDICT_LABELS.items():
-        if text == label:
-            return code
-    return "insufficient"
-
-
-def _summary_line(summary: Mapping[str, Any]) -> str:
+def _chance_title(summary: Mapping[str, Any]) -> str:
     if summary["mode"] == WEEKEND:
-        parts = []
-        for index in (0, 1):
-            day_label = "сб" if index == 0 else "вс"
-            verdicts = ", ".join(
-                f"{item['short_name']} — {item['weekend'][index]['verdict_label']}"
-                for item in summary["locations"]
-            )
-            parts.append(f"{day_label}: {verdicts}")
-        parts.append(_best_weekend(summary))
-        return "; ".join(parts)
-    verdicts = ", ".join(
-        f"{item['short_name']} — {item['verdict_label']}"
-        for item in summary["locations"]
+        return "ШАНС на выходные"
+    return f"ШАНС на {_dm(summary['date'])}"
+
+
+def _chance_line(item: Mapping[str, Any], mode: str) -> str:
+    """One location, one line -- twenty of these must still fit a message."""
+    if mode == WEEKEND:
+        days = ", ".join(
+            f"{day['label']} {_pct(day['chance'])}" for day in item["weekend"]
+        )
+        return f"{item['short_name']} — {days}"
+    return f"{item['short_name']} — {_pct(item['chance'])}"
+
+
+def _rank(item: Mapping[str, Any], mode: str) -> int | None:
+    """What ``ПОДРОБНО`` is chosen by: the best day shown for the location."""
+    if mode == WEEKEND:
+        values = [day["chance"] for day in item["weekend"] if day["chance"] is not None]
+        return max(values) if values else None
+    return item["chance"]
+
+
+def _leaders(summary: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    """The best locations by chance; a tie is broken by the config order."""
+    mode = str(summary["mode"])
+    ordered = sorted(
+        enumerate(summary["locations"]),
+        key=lambda pair: (-(_rank(pair[1], mode) or -1), pair[0]),
     )
-    return f"{verdicts}; {_outlook_tail(summary)}"
+    return [item for _, item in ordered[:DETAIL_LOCATIONS]]
 
 
 def _facts(item: Mapping[str, Any]) -> str:
     bits = [f"API30 {_mm(item['api30_mm'])}"]
-    level = _level(item["chmi_level"])
-    if level:
-        bits.append(f"карта ČHMÚ {level}")
     houby = _level(item["houbymapa_level"])
     if houby and item["houbymapa_score"] is not None:
         bits.append(f"HoubyMapa {houby} ({item['houbymapa_score']:.2f})")
     elif houby:
         bits.append(f"HoubyMapa {houby}")
+    level = _level(item["chmi_level"])
+    if level:
+        bits.append(f"карта ČHMÚ {level}")
     if item["rain_7d_mm"] is not None:
         bits.append(f"за 7 дней {_mm(item['rain_7d_mm'])}")
     return ", ".join(bits)
 
 
-def _prospect(item: Mapping[str, Any]) -> str:
-    days = item["candidate_in_days"]
-    if item["candidate_high_date"] is None:
-        return f"нет в горизонте {_days(item['horizon_days'])}"
-    if days is not None and days <= 0:
-        return "высокая уже сегодня"
-    return f"высокая через {_days(days)} ({_dm(item['candidate_high_date'])}){_vague(days)}"
+def _peak_tail(item: Mapping[str, Any], summary: Mapping[str, Any]) -> str:
+    """``максимум 70 % 18.09`` -- the same curve, not a separate rule.
+
+    Silent when the best day is already on the block (today, or one of the
+    two weekend days) or is no better than what the block shows.
+    """
+    peak = item["chance_peak"]
+    if not peak or peak[0] is None or peak[1] is None:
+        return ""
+    today: date = summary["date"]
+    shown = {today}
+    reference = item["chance"]
+    if str(summary["mode"]) == WEEKEND:
+        shown |= {day["date"] for day in item["weekend"]}
+        values = [day["chance"] for day in item["weekend"] if day["chance"] is not None]
+        reference = max(values) if values else reference
+    if peak[0] in shown or (reference is not None and peak[1] <= reference):
+        return ""
+    return f"; максимум {peak[1]} % {_dm(peak[0])}{_vague((peak[0] - today).days)}"
 
 
-def _location_lines(item: Mapping[str, Any], mode: str) -> list[str]:
-    out = [f"ЛОКАЦИЯ {item['name']}:"]
+def _detail_line(
+    item: Mapping[str, Any], summary: Mapping[str, Any], headline_phase: str
+) -> str:
+    mode = str(summary["mode"])
     if mode == WEEKEND:
-        days = "; ".join(
-            f"{day['label']} {_dm(day['date'])}: {day['verdict_label']}"
-            for day in item["weekend"]
+        best = max(
+            item["weekend"],
+            key=lambda day: (day["chance"] if day["chance"] is not None else -1),
         )
-        out.append(f"  {days} — {_facts(item)}")
-        out.append(f"  перспектива: {_prospect(item)}")
-        rain = item["weekend_rain_mm"]
-        if rain is None:
-            out.append("  дождь на выходные: данных нет")
-        elif rain < 1.0:
-            out.append("  дождь на выходные: не ожидается")
-        else:
-            detail = ", ".join(
-                f"{day['label']} {_mm(day['precip_mm'])}"
-                for day in item["weekend"]
-                if (day["precip_mm"] or 0.0) >= 1.0
-            )
-            out.append(f"  дождь на выходные: {_mm(rain)} ({detail})")
-        return out
-    out.append(f"  сегодня: {item['verdict_label']} — {_facts(item)}")
-    out.append(f"  перспектива: {_prospect(item)}")
-    if item["next_rain"]:
-        day, value = item["next_rain"]
-        out.append(
-            f"  дождь: ближайший ≥ {policy.NEXT_RAIN_MM:.0f} мм — {_mm(value)} {_dm(day)}"
-        )
+        head = f"{item['short_name']} {_pct(best['chance'])} ({best['label']})"
     else:
-        out.append(
-            f"  дождь: ближайший ≥ {policy.NEXT_RAIN_MM:.0f} мм не ожидается"
-        )
-    return out
+        head = f"{item['short_name']} {_pct(item['chance'])}"
+    line = f"{head}: {_facts(item)}{_peak_tail(item, summary)}"
+    own_phase = _phase_sentence(item)
+    if own_phase != headline_phase:
+        line += f"; фаза: {own_phase}"
+    return line
+
+
+def _detail_lines(summary: Mapping[str, Any]) -> list[str]:
+    headline = str(summary["phase_text"])
+    return [_detail_line(item, summary, headline) for item in _leaders(summary)]
 
 
 def render(summary: Mapping[str, Any], *, send: bool, reason: str) -> str:
@@ -544,14 +564,22 @@ def render(summary: Mapping[str, Any], *, send: bool, reason: str) -> str:
         f"ЗАГОЛОВОК: {_header(summary)}",
     ]
     if summary["error_class"] == "brief":
-        lines.append("ИТОГ: данных нет, прогноз не собрался")
+        lines.append("ШАНС: данных нет, прогноз не собрался")
         lines.append("ФАЗА: данных нет")
         lines.append(f"ОГОВОРКИ: {summary['caveats']}")
         return "\n".join(lines) + "\n"
-    lines.append(f"ИТОГ: {_summary_line(summary)}")
+
+    mode = str(summary["mode"])
+    lines.append(f"{_chance_title(summary)}:")
+    for item in summary["locations"]:  # locations.yaml order, never sorted
+        lines.append(f"  {_chance_line(item, mode)}")
     lines.append(f"ФАЗА: {summary['phase_text']}")
-    for item in summary["locations"]:
-        lines += _location_lines(item, str(summary["mode"]))
+    details = _detail_lines(summary)
+    if details:
+        lines.append(
+            f"ПОДРОБНО ({len(details)} {_locations_word(len(details))} с лучшим шансом):"
+        )
+        lines += [f"  {line}" for line in details]
     lines.append(f"ОГОВОРКИ: {summary['caveats']}")
     return "\n".join(lines) + "\n"
 
@@ -560,18 +588,23 @@ def to_json(
     summary: Mapping[str, Any], *, send: bool, reason: str
 ) -> dict[str, Any]:
     """The same fields, machine-readable, for tests and for debugging."""
+    broken = summary["error_class"] == "brief"
+    mode = str(summary["mode"])
+    leaders = {item["slug"] for item in _leaders(summary)}
     payload = {
         "mode": summary["mode"],
         "date": summary["date"],
         "send": send,
         "reason": reason,
         "header": _header(summary),
-        "summary": (
-            "данных нет, прогноз не собрался"
-            if summary["error_class"] == "brief"
-            else _summary_line(summary)
+        "chance_title": _chance_title(summary),
+        "chances": (
+            []
+            if broken
+            else [_chance_line(item, mode) for item in summary["locations"]]
         ),
-        "phase_text": summary["phase_text"],
+        "detail": [] if broken else _detail_lines(summary),
+        "phase_text": "данных нет" if broken else summary["phase_text"],
         "error_class": summary["error_class"],
         "rules_version": summary["rules_version"],
         "caveats": summary["caveats"],
@@ -581,14 +614,17 @@ def to_json(
                 "slug": item["slug"],
                 "name": item["name"],
                 "short_name": item["short_name"],
+                "chance": item["chance"],
+                "chance_peak": item["chance_peak"],
+                "chance_capped": item["chance_capped"],
                 "verdict": item["verdict"],
                 "verdict_label": item["verdict_label"],
+                "phase": item["phase"],
                 "facts": _facts(item),
-                "prospect": _prospect(item),
+                "weekend": item["weekend"],
+                "detailed": item["slug"] in leaders,
                 "candidate_high_date": item["candidate_high_date"],
                 "next_rain": item["next_rain"],
-                "weekend": item["weekend"],
-                "lines": _location_lines(item, str(summary["mode"]))[1:],
             }
             for item in summary["locations"]
         ],
@@ -604,6 +640,7 @@ def publish(store: Store, summary: Mapping[str, Any]) -> tuple[bool, str]:
     store.save_report(
         summary["date"],
         str(summary["mode"]),
+        chances=state["chances"],
         verdicts=state["verdicts"],
         candidates=state["candidates"],
         events=state["events"],

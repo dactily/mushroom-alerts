@@ -6,7 +6,9 @@ station open data and Open-Meteo -- plus an API30 rain index projected 16
 days ahead, which none of the upstreams offers.  No bot of its own: it is a
 CLI that Hermes Agent runs from cron.  `brief --mode daily|weekend` prints a
 short block that is already worded for a human and already says whether to
-send it at all; Hermes only re-words it for Telegram.  Plain `brief` prints
+send it at all; Hermes only re-words it for Telegram.  The block is a list of
+"location — chance, %" in the order of `locations.yaml`: the script never
+ranks or recommends, the human decides where to drive.  Plain `brief` prints
 every fact and both tables for debugging, and `check` keeps the deterministic
 exit-code contract for when no interpretation is wanted.  Nothing here calls an LLM.  See `PLAN.md` for
 the whole design, `hermes/PROMPT.md` for the text pasted into the Hermes
@@ -32,6 +34,7 @@ python3 -m venv .venv
 .venv/bin/python -m mushroom_alerts brief                 # full debug view
 .venv/bin/python -m mushroom_alerts brief --json
 .venv/bin/python -m mushroom_alerts brief --days 7        # shorter forecast table
+.venv/bin/python -m mushroom_alerts brief --location valmez  # one location only
 
 .venv/bin/python -m mushroom_alerts status           # last stored snapshot
 .venv/bin/python -m mushroom_alerts status --json
@@ -96,11 +99,15 @@ deterministic triggers that fired, the sources that failed, and a stable
 "Как читать" cheat sheet. That view is for debugging.
 
 What the cron jobs actually run is `brief --mode daily` or `--mode weekend`:
-under 1.5 KB, no tables, Russian, with `ОТПРАВЛЯТЬ: да|нет` on the first line.
-The decision compares today against the last report of an earlier date stored
-in `reports`; the weekend plan is always sent. `--mode --json` prints the same
-fields as a dict. `--days N`
-shortens the forecast table, `--json` gives the same content as a dict
+no tables, Russian, with `ОТПРАВЛЯТЬ: да|нет` on the first line, and under
+2 KB even with twenty locations. It prints `ШАНС` (one line per location, in
+the order of `locations.yaml`), `ФАЗА`, `ПОДРОБНО` for the two locations with
+the best chance, and `ОГОВОРКИ`. The decision compares today against the last
+report of an earlier date stored in `reports`; the weekend plan is always
+sent. `--mode --json` prints the same fields as a dict. `--days N`
+shortens the forecast table, `--location SLUG` (repeatable) narrows either
+view to a few locations -- a debugging filter, so with `--mode` it prints the
+decision but records no report row. `--json` gives the same content as a dict
 (including `check --json`'s per-location decision data).  Exit code is
 always `0` unless every source failed or rule calculation failed. Running
 `brief` archives observations and forecast releases but does not update
@@ -120,9 +127,12 @@ API30 with later station observations. It reports sample size, bias
 | `MUSHROOM_RECORD` | unset | `1` dumps every HTTP response into `tests/fixtures/` |
 | `MUSHROOM_API30_THRESHOLD` | `25` (mm) | API30 level that trigger 4 announces; provisional, see PLAN §3 |
 
-`locations.yaml` holds only name + coordinates.  Everything derived (ČHMÚ
-pixel, HoubyMapa cell, nearest stations) is computed on the fly and cached
-in SQLite, and is dropped automatically when a location moves.
+`locations.yaml` holds name + coordinates, plus an optional `short` (the
+name the message prints -- "Bystřice pod Hostýnem" does not fit a list of
+twenty) and an optional `slug`.  Its order is the order of the message and is
+preserved everywhere.  Everything derived (ČHMÚ pixel, HoubyMapa cell,
+nearest stations) is computed on the fly and cached in SQLite, and is dropped
+automatically when a location moves.
 
 ## Tests
 
@@ -130,7 +140,7 @@ in SQLite, and is dropped automatically when a location moves.
 .venv/bin/python -m pytest
 ```
 
-Fully offline (325 tests): `tests/fixtures/` holds real responses recorded on
+Fully offline (430 tests): `tests/fixtures/` holds real responses recorded on
 2026-09-07 with `MUSHROOM_RECORD=1`.  To refresh them:
 
 ```sh
@@ -160,9 +170,14 @@ failures are soft by design.
   rollback compatibility. Metrics in one view always come from one release.
   Schema v3 adds a stable content hash: identical reruns reuse the same release,
   while changed values on the same day create a new one.
-- SQLite migrations use `PRAGMA user_version`; current schema version is 4.
-  Schema v4 adds the additive `reports` table (one row per date and mode).
-- The application, not Hermes, calculates the conservative biological
+- SQLite migrations use `PRAGMA user_version`; current schema version is 5.
+  Schema v4 adds the additive `reports` table (one row per date and mode);
+  schema v5 adds the additive `reports.chances_json` column, the per-location
+  percentages the send rule compares.
+- The application, not Hermes, calculates both the comparable chance in
+  percent (PLAN §9b: phase base x API30 band x temperature gate x frost x,
+  for today only, the two maps; rounded to 5 % inside 5-95 %, capped at 50 %
+  without a fresh station) and the conservative biological
   verdict. All qualifying rain episodes are retained; overlapping rolling
   windows from one wet spell are merged. An older active episode outranks a
   newer waiting episode. D+7...D+12 is the primary window, D+13...D+21 is a
@@ -173,8 +188,10 @@ failures are soft by design.
 - The application also decides whether to send at all. `brief --mode
   daily|weekend` prints a short ready-to-send Russian block starting with
   `ОТПРАВЛЯТЬ: да|нет`, and stores the state it compared against in the
-  `reports` table. Hermes only re-words that block; durable notepads are no
-  longer used.
+  `reports` table. Daily it speaks when a location's chance moved by 10
+  points or more, when the best chance crossed 60 % either way, on the first
+  run, when a location is new, or when the error class changed. Hermes only
+  re-words that block; durable notepads are no longer used.
   Transport results remain in Hermes `delivery_outcome`; they are not copied
   into the application database. Exactly-once delivery is not guaranteed.
 
@@ -187,4 +204,7 @@ the existing column and restores `user_version=3`.
 
 Schema v4 is the same kind of step: the new `reports` table is additive, and a
 rollback to a v3 binary needs `PRAGMA user_version=3` while the jobs are
-stopped. The table itself may stay; no other table is touched.
+stopped. The table itself may stay; no other table is touched. Schema v5 adds
+only `reports.chances_json` (default `'{}'`) and rolls back the same way with
+`PRAGMA user_version=4`; a v4 binary ignores the extra column, and the first
+v5 run after such a rollback sends once, because it finds no stored chances.

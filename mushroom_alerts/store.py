@@ -29,7 +29,9 @@ Tables
 ``reports``
     One row per rendered Hermes report (date, mode).  It holds the compact
     state the send/silent decision compares against, so continuity lives in
-    SQLite rather than in an agent's notepad (PLAN §2b).
+    SQLite rather than in an agent's notepad (PLAN §2b).  Schema v5 adds
+    ``chances_json``: the send rule compares percentages (PLAN §9d), while
+    the verdicts stay for the debugging view.
 """
 
 from __future__ import annotations
@@ -48,7 +50,7 @@ from .base import Location, Reading, utcnow
 __all__ = ["Store", "db_path", "DEFAULT_DB", "SCHEMA_VERSION"]
 
 DEFAULT_DB = "state.sqlite"
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS readings (
@@ -152,6 +154,7 @@ CREATE TABLE IF NOT EXISTS reports (
     date           TEXT NOT NULL,
     mode           TEXT NOT NULL,
     verdicts_json  TEXT NOT NULL DEFAULT '{}',
+    chances_json   TEXT NOT NULL DEFAULT '{}',
     candidates_json TEXT NOT NULL DEFAULT '{}',
     events_json    TEXT NOT NULL DEFAULT '{}',
     error_class    TEXT NOT NULL DEFAULT 'none',
@@ -240,6 +243,18 @@ class Store:
         if version < 4:
             self.conn.executescript(MIGRATION_4)
             self.conn.execute("PRAGMA user_version=4")
+            version = 4
+        if version < 5:
+            columns = {
+                str(row["name"])
+                for row in self.conn.execute("PRAGMA table_info(reports)")
+            }
+            if "chances_json" not in columns:
+                self.conn.execute(
+                    "ALTER TABLE reports ADD COLUMN chances_json "
+                    "TEXT NOT NULL DEFAULT '{}'"
+                )
+            self.conn.execute("PRAGMA user_version=5")
 
     def _backfill_notifications(self) -> None:
         for row in self.conn.execute("SELECT * FROM notifications ORDER BY id"):
@@ -761,6 +776,7 @@ class Store:
         day: date | str,
         mode: str,
         *,
+        chances: dict[str, Any],
         verdicts: dict[str, Any],
         candidates: dict[str, Any],
         events: dict[str, Any],
@@ -778,10 +794,12 @@ class Store:
         with self.conn:
             self.conn.execute(
                 """INSERT INTO reports
-                   (date, mode, verdicts_json, candidates_json, events_json,
-                    error_class, rules_version, sent, reason, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   (date, mode, chances_json, verdicts_json, candidates_json,
+                    events_json, error_class, rules_version, sent, reason,
+                    created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT (date, mode) DO UPDATE SET
+                    chances_json=excluded.chances_json,
                     verdicts_json=excluded.verdicts_json,
                     candidates_json=excluded.candidates_json,
                     events_json=excluded.events_json,
@@ -793,6 +811,7 @@ class Store:
                 (
                     _iso(day),
                     mode,
+                    json.dumps(chances, ensure_ascii=False, sort_keys=True),
                     json.dumps(verdicts, ensure_ascii=False, sort_keys=True),
                     json.dumps(candidates, ensure_ascii=False, sort_keys=True),
                     json.dumps(events, ensure_ascii=False, sort_keys=True),

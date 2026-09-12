@@ -29,6 +29,27 @@ def test_shipped_file_has_the_two_plan_locations():
     assert [l.slug for l in locs] == ["valmez", "valasska-bystrice"]
     assert (locs[0].lat, locs[0].lon) == (49.4718, 17.9711)
     assert (locs[1].lat, locs[1].lon) == (49.416, 18.106)
+    assert [l.short_name for l in locs] == ["Valmez", "Bystřice"]
+
+
+def test_a_short_name_is_explicit_and_never_guessed(tmp_path):
+    """Truncating to the last word would print "Hostýnem" (PLAN §9f)."""
+    path = tmp_path / "l.yaml"
+    path.write_text(
+        "- {name: Bystřice pod Hostýnem, lat: 49.3994, lon: 17.6742}\n"
+        "- {name: Valašské Meziříčí, short: Valmez, lat: 49.4718, lon: 17.9711}\n",
+        encoding="utf-8",
+    )
+    locs = L.load_locations(path)
+    assert locs[0].short == "" and locs[0].short_name == "Bystřice pod Hostýnem"
+    assert locs[1].short == "Valmez" and locs[1].short_name == "Valmez"
+
+
+def test_a_short_name_survives_a_rewrite(tmp_path):
+    path = tmp_path / "l.yaml"
+    L.save_locations(L.load_locations(SHIPPED), path)
+    assert "short: Valmez" in path.read_text(encoding="utf-8")
+    assert [l.short for l in L.load_locations(path)] == ["Valmez", "Bystřice"]
 
 
 def test_load_missing_file(tmp_path):

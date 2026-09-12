@@ -7,9 +7,13 @@
 - `mushroom_brief.sh` (daily 08:30 Europe/Prague) runs
   `brief --mode daily`; `mushroom_weekend.sh` (Friday 19:00) runs
   `brief --mode weekend`.
-- The application computes everything: per-location verdict, cycle phase,
-  outlook, the caveats, and the send/silent decision. The block starts with
-  `ОТПРАВЛЯТЬ: да|нет`. `нет` means the agent answers exactly `[SILENT]`.
+- The application computes everything: the per-location chance in percent,
+  the cycle phase, the two technical lines, the caveats, and the send/silent
+  decision. The block starts with `ОТПРАВЛЯТЬ: да|нет`. `нет` means the
+  agent answers exactly `[SILENT]`.
+- The list under `ШАНС` is in the order of `locations.yaml` and must stay
+  that way: the user keeps his own order and decides himself where to
+  drive. Neither the script nor the agent ranks or recommends locations.
 - `daily_prompt.txt` and `friday_prompt.txt` are the two prompts. They only
   tell the agent to obey that flag and to re-word the block as a Telegram
   message, keeping every number and date verbatim.
@@ -28,11 +32,16 @@
 Daily, `send = да` when at least one holds:
 
 1. there is no daily report from an earlier date (first run);
-2. a location verdict differs from the last daily report;
-3. the candidate high-probability date newly entered the next 7 days,
-   disappeared from them, or moved by more than 2 days;
-4. `error_class` changed (`none` / `station` / `brief`); a dead ČHMÚ map or
+2. the chance of any location moved by 10 points or more against the last
+   daily report;
+3. the best chance crossed 60 % in either direction;
+4. a location appeared that the last report did not have;
+5. `error_class` changed (`none` / `station` / `brief`); a dead ČHMÚ map or
    HoubyMapa never changes it and only appears in `ОГОВОРКИ`.
+
+With twenty locations the previous rule ("any verdict changed") fired
+almost every day, because a verdict is a coarse word; a percentage moves
+smoothly, so the rule is about the size of the move.
 
 Weekend: always `да`. Re-running a mode on the same day is idempotent — the
 comparison is always against the last report from an earlier date, and the
@@ -41,6 +50,17 @@ row for today is replaced.
 Deterministic fallback without any agent reasoning is unchanged:
 `python -m mushroom_alerts check`, exit `10` → forward stdout, `0` → silence,
 `1` → error.
+
+## Chance in percent v4
+
+The block reports one comparable number per location instead of the
+four-word verdict: on 12.09.2026 eight locations all came out «средняя»
+while HoubyMapa ranged 0.62–0.90 and station API30 20–27 mm. The number is
+a product of the rain-episode phase, the API30 band, the temperature gate,
+frost, and — for today only — the two maps; it is rounded to 5 % inside
+5–95 % and capped at 50 % when the station is missing or stale. It is not
+calibrated against finds and is not a probability: it says how much the
+site today looks like conditions under which mushrooms come.
 
 ## Biological verdict v3
 
@@ -62,7 +82,8 @@ requires:
 
 The maps remain model evidence, not proof that mushrooms are present. The
 wording for every phase is produced by `report.py`, so the agent never has to
-describe a window or decide how confident to sound.
+describe a window or decide how confident to sound. The verdict itself is
+unchanged by the percentage; it stays in the debugging brief.
 
 ## Deployment note
 

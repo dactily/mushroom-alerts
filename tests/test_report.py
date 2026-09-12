@@ -3,6 +3,11 @@
 The decision used to live in an LLM prompt and a durable notepad. Here it is
 ordinary code, so it can be pinned down: what makes a message, what keeps
 quiet, and what a second run on the same day must not change.
+
+Since PLAN §9 the block is a list of "location — chance, %" in the order of
+``locations.yaml``. Two things are therefore worth as much as the decision
+itself: that the order survives, and that the script never advises where to
+drive -- it only picks which two locations get a technical line.
 """
 
 from __future__ import annotations
@@ -20,6 +25,23 @@ FRIDAY = date(2026, 9, 11)
 
 ISO_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
 
+HORIZON = 16
+
+
+def chance_block(today, value, *, curve=None, capped=False):
+    """``views`` hands the report this shape; ``curve`` overrides by offset."""
+    days = {
+        today + timedelta(days=n): (curve or {}).get(n, value)
+        for n in range(0, HORIZON + 1)
+    }
+    peak = min(days.items(), key=lambda pair: (-pair[1], pair[0]))
+    return {
+        "today": days[today],
+        "curve": days,
+        "peak": peak,
+        "capped": capped,
+    }
+
 
 # ----------------------------------------------------------------------
 # a brief payload, reduced to the fields ``report`` reads
@@ -27,7 +49,11 @@ ISO_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
 def location(
     slug="valmez",
     name="Valašské Meziříčí",
+    short="Valmez",
     *,
+    chance=40,
+    curve=None,
+    capped=False,
     verdict="medium",
     phase="waiting",
     candidate=None,
@@ -42,7 +68,7 @@ def location(
             "precip_mm": 6.0 if n in (5, 6) else 0.0,
             "verdict": "средняя",
         }
-        for n in range(0, 17)
+        for n in range(0, HORIZON + 1)
     ]
     for offset, label in enumerate(forecast_verdicts):
         # today and tomorrow are the weekend in these fixtures
@@ -50,6 +76,7 @@ def location(
     return {
         "slug": slug,
         "name": name,
+        "short_name": short or name,
         "chmi": {"level": 3.0},
         "houbymapa": {"level": 4.0, "score": 0.63},
         "station": {
@@ -65,6 +92,7 @@ def location(
             "next_rain": (today + timedelta(days=5), 27.4),
         },
         "biological": {
+            "chance": chance_block(today, chance, curve=curve, capped=capped),
             "rain_episode": {
                 "date": anchor,
                 "growth_window": [anchor + timedelta(days=7), anchor + timedelta(days=12)],
@@ -100,6 +128,28 @@ def summary(mode="daily", *, today=TODAY, payload=None, **kw):
     )
 
 
+def four_locations(today=TODAY, **chances):
+    """Config order that matches neither the alphabet nor the chance."""
+    spec = [
+        ("valmez", "Valašské Meziříčí", "Valmez", 40),
+        ("bystrice-pod-hostynem", "Bystřice pod Hostýnem", None, 50),
+        ("rajnochovice", "Rajnochovice", None, 55),
+        ("katerinice", "Kateřinice", None, 35),
+    ]
+    return brief(
+        *(
+            location(
+                slug=slug,
+                name=name,
+                short=short,
+                chance=chances.get(slug.replace("-", "_"), value),
+                today=today,
+            )
+            for slug, name, short, value in spec
+        )
+    )
+
+
 @pytest.fixture
 def store(tmp_path):
     with Store(tmp_path / "s.sqlite") as db:
@@ -107,7 +157,7 @@ def store(tmp_path):
 
 
 # ----------------------------------------------------------------------
-# the decision
+# the decision (PLAN §9d)
 # ----------------------------------------------------------------------
 def test_first_run_always_sends(store):
     send, reason = report_lib.publish(store, summary())
@@ -122,67 +172,70 @@ def test_an_unchanged_day_stays_silent(store):
     assert reason == "ничего не изменилось с прошлого отчёта"
 
 
-def test_a_changed_verdict_sends(store):
+@pytest.mark.parametrize(
+    "before, now, sends",
+    [
+        (40, 40, False),
+        (40, 49, False),  # nine points is noise
+        (40, 31, False),
+        (40, 50, True),  # ten points is news
+        (40, 30, True),
+        (55, 60, True),  # five points, but the 60 % line was crossed
+        (60, 55, True),
+        (61, 95, True),
+        (65, 62, False),  # both sides of the line, no big move
+    ],
+)
+def test_the_send_rule_is_about_the_size_of_the_move(store, before, now, sends):
+    report_lib.publish(
+        store, summary(today=FRIDAY, payload=brief(location(chance=before, today=FRIDAY)))
+    )
+    send, reason = report_lib.publish(
+        store, summary(today=TODAY, payload=brief(location(chance=now)))
+    )
+    assert send is sends, reason
+
+
+def test_a_move_at_any_single_location_is_enough(store):
+    report_lib.publish(store, summary(today=FRIDAY, payload=four_locations(FRIDAY)))
+    send, reason = report_lib.publish(
+        store, summary(today=TODAY, payload=four_locations(katerinice=15))
+    )
+    assert send is True
+    assert "Kateřinice: шанс 35 % → 15 %" in reason
+
+
+def test_a_new_location_is_news(store):
     report_lib.publish(store, summary(today=FRIDAY))
-    changed = summary(
-        today=TODAY, payload=brief(location(verdict="high", phase="primary_window"))
-    )
-    send, reason = report_lib.publish(store, changed)
-    assert send is True
-    assert "средняя → высокая" in reason
-
-
-def test_a_one_day_shift_of_the_window_is_not_news(store):
-    report_lib.publish(
-        store,
-        summary(
-            today=FRIDAY,
-            payload=brief(location(candidate=FRIDAY + timedelta(days=5), today=FRIDAY)),
-        ),
-    )
-    send, _ = report_lib.publish(
-        store,
-        summary(
-            today=TODAY, payload=brief(location(candidate=FRIDAY + timedelta(days=6)))
-        ),
-    )
-    assert send is False
-
-
-def test_a_three_day_shift_of_the_window_sends(store):
-    report_lib.publish(
-        store,
-        summary(
-            today=FRIDAY,
-            payload=brief(location(candidate=FRIDAY + timedelta(days=5), today=FRIDAY)),
-        ),
-    )
     send, reason = report_lib.publish(
         store,
         summary(
-            today=TODAY, payload=brief(location(candidate=FRIDAY + timedelta(days=8)))
+            today=TODAY,
+            payload=brief(location(), location(slug="rajnochovice", name="Rajnochovice", short=None)),
         ),
     )
     assert send is True
-    assert "сдвинулась на 3 дня" in reason
+    assert "Rajnochovice: новая локация, шанс 40 %" in reason
 
 
-def test_a_window_entering_the_next_week_sends(store):
+def test_the_crossing_names_the_threshold(store):
     report_lib.publish(
+        store, summary(today=FRIDAY, payload=brief(location(chance=55, today=FRIDAY)))
+    )
+    _, reason = report_lib.publish(
+        store, summary(today=TODAY, payload=brief(location(chance=60)))
+    )
+    assert reason == "лучший шанс 60 %, выше 60 %"
+
+    _, reason = report_lib.publish(
         store,
-        summary(
-            today=FRIDAY,
-            payload=brief(location(candidate=FRIDAY + timedelta(days=14), today=FRIDAY)),
+        report_lib.summarize(
+            brief(location(chance=55, today=TODAY + timedelta(days=1))),
+            mode="daily",
+            today=TODAY + timedelta(days=1),
         ),
     )
-    send, reason = report_lib.publish(
-        store,
-        summary(
-            today=TODAY, payload=brief(location(candidate=TODAY + timedelta(days=6)))
-        ),
-    )
-    assert send is True
-    assert "вошла в ближайшие 7 дней" in reason
+    assert reason == "лучший шанс упал до 55 %, ниже 60 %"
 
 
 def test_a_new_error_class_sends_once(store):
@@ -239,8 +292,8 @@ def test_the_weekend_plan_reports_a_broken_brief(store):
     send, reason = report_lib.publish(store, item)
     assert send is True and "бриф не собрался" in reason
     text = report_lib.render(item, send=send, reason=reason)
-    assert "ИТОГ: данных нет" in text
-    assert "ЛОКАЦИЯ" not in text
+    assert "ШАНС: данных нет, прогноз не собрался" in text
+    assert "ПОДРОБНО" not in text
 
 
 def test_the_daily_and_weekend_states_do_not_mix(store):
@@ -255,68 +308,157 @@ def test_an_unknown_mode_is_rejected():
 
 
 # ----------------------------------------------------------------------
-# the block
+# the block (PLAN §9c)
 # ----------------------------------------------------------------------
 def test_the_daily_block_has_every_field_and_no_iso_dates():
     item = summary(
         payload=brief(
-            location(candidate=TODAY + timedelta(days=6)),
+            location(curve={6: 70}),
             location(
                 slug="valasska-bystrice",
                 name="Valašská Bystřice",
-                candidate=TODAY + timedelta(days=6),
+                short="Bystřice",
+                chance=35,
             ),
         )
     )
     text = report_lib.render(item, send=True, reason="тест")
     assert text.startswith("ОТПРАВЛЯТЬ: да\nПРИЧИНА: тест\n")
     assert "ЗАГОЛОВОК: 🍄 Грибной прогноз: 12.09" in text
-    assert "ИТОГ: Valmez — средняя, Bystřice — средняя; высокая ожидается с 18.09" in text
+    assert "ШАНС на 12.09:\n  Valmez — 40 %\n  Bystřice — 35 %\n" in text
     assert "ФАЗА: дождь прошёл 11.09, условия для роста ожидаются с 18.09" in text
-    assert "ЛОКАЦИЯ Valašské Meziříčí:" in text
+    assert "ПОДРОБНО (2 локации с лучшим шансом):" in text
     assert (
-        "  сегодня: средняя — API30 24 мм, карта ČHMÚ 3/5, HoubyMapa 4/5 (0.63), "
-        "за 7 дней 26 мм" in text
+        "  Valmez 40 %: API30 24 мм, HoubyMapa 4/5 (0.63), карта ČHMÚ 3/5, "
+        "за 7 дней 26 мм; максимум 70 % 18.09\n" in text
     )
-    assert "  перспектива: высокая через 6 дней (18.09)" in text
-    assert "  дождь: ближайший ≥ 5 мм — 27 мм 17.09" in text
+    assert "  Bystřice 35 %: API30 24 мм" in text
     assert "ОГОВОРКИ: нет" in text
     assert not ISO_DATE.search(text)
     assert text.count("🍄") == 1
 
 
-def test_a_far_window_is_marked_as_a_guess():
-    item = summary(payload=brief(location(candidate=TODAY + timedelta(days=9))))
+def test_the_chance_list_is_in_the_config_order_never_sorted():
+    """The user keeps his own order; the script must not touch it."""
+    text = report_lib.render(
+        summary(payload=four_locations()), send=True, reason="тест"
+    )
+    listed = [
+        line.strip().split(" — ")[0]
+        for line in text.splitlines()
+        if line.startswith("  ") and " — " in line
+    ]
+    assert listed == [
+        "Valmez",
+        "Bystřice pod Hostýnem",
+        "Rajnochovice",
+        "Kateřinice",
+    ]
+    assert listed != sorted(listed)  # not alphabetical
+    assert listed[0] != "Rajnochovice"  # not by chance either
+
+
+def test_a_location_without_a_short_name_keeps_its_full_name():
+    """Truncating to the last word would print "Hostýnem" (PLAN §9f)."""
+    text = report_lib.render(
+        summary(payload=four_locations()), send=True, reason="тест"
+    )
+    assert "  Bystřice pod Hostýnem — 50 %" in text
+    assert "Hostýnem —" not in text.replace("Bystřice pod Hostýnem —", "")
+
+
+def test_only_the_two_best_locations_get_a_technical_line():
+    text = report_lib.render(
+        summary(payload=four_locations()), send=True, reason="тест"
+    )
+    details = [line for line in text.splitlines() if line.startswith("  ") and ":" in line]
+    assert len(details) == 2
+    assert details[0].startswith("  Rajnochovice 55 %:")
+    assert details[1].startswith("  Bystřice pod Hostýnem 50 %:")
+
+
+def test_a_tie_for_the_detail_lines_is_broken_by_the_config_order():
+    text = report_lib.render(
+        summary(payload=four_locations(valmez=55, rajnochovice=55, katerinice=55)),
+        send=True,
+        reason="тест",
+    )
+    details = [line for line in text.splitlines() if line.startswith("  ") and ":" in line]
+    assert [line.split()[1] for line in details] == ["55", "55"]
+    assert details[0].startswith("  Valmez 55 %:")
+    assert details[1].startswith("  Rajnochovice 55 %:")
+
+
+def test_a_detail_line_carries_its_own_phase_when_it_differs():
+    payload = brief(
+        location(phase="primary_window"),
+        location(
+            slug="rajnochovice",
+            name="Rajnochovice",
+            short=None,
+            chance=55,
+            phase="waiting",
+        ),
+    )
+    text = report_lib.render(summary(payload=payload), send=True, reason="тест")
+    assert "ФАЗА: расчётное окно роста идёт, стоит проверить лес" in text
+    assert (
+        "; фаза: дождь прошёл 11.09, условия для роста ожидаются с 18.09"
+        in text.split("ПОДРОБНО")[1]
+    )
+    # the headline location does not repeat the headline phase
+    assert text.count("расчётное окно роста идёт") == 1
+
+
+def test_a_capped_location_is_named_in_the_caveats_not_in_the_list():
+    item = summary(
+        payload=brief(
+            location(chance=50, capped=True),
+            location(slug="rajnochovice", name="Rajnochovice", short=None, chance=40),
+        )
+    )
     text = report_lib.render(item, send=True, reason="тест")
-    assert "высокая ожидается с 21.09 (ориентировочно)" in text
-    assert "перспектива: высокая через 9 дней (21.09) (ориентировочно)" in text
+    assert "  Valmez — 50 %\n" in text
+    assert "ОГОВОРКИ: без свежей станции шанс ограничен 50 %: Valmez" in text
 
 
-def test_no_window_says_so_in_plain_words():
-    text = report_lib.render(summary(), send=True, reason="тест")
-    assert "окна в горизонте нет" in text
-    assert "перспектива: нет в горизонте 16 дней" in text
+def test_a_location_without_a_chance_says_so():
+    payload = brief(location())
+    payload["locations"][0]["biological"].pop("chance")
+    text = report_lib.render(summary(payload=payload), send=True, reason="тест")
+    assert "  Valmez — нет данных" in text
 
 
 def test_the_weekend_block_speaks_about_both_days():
     item = summary(
         "weekend",
         payload=brief(
-            location(forecast_verdicts=("средняя", "низкая")),
+            location(curve={0: 55, 1: 60}),
             location(
                 slug="valasska-bystrice",
                 name="Valašská Bystřice",
-                forecast_verdicts=("высокая", "средняя"),
+                short="Bystřice",
+                chance=35,
+                curve={0: 35, 1: 30},
             ),
         ),
     )
     text = report_lib.render(item, send=True, reason="тест")
     assert "ЗАГОЛОВОК: 🍄 Грибной прогноз на выходные 12–13.09" in text
-    assert "ИТОГ: сб: Valmez — средняя, Bystřice — высокая; вс: " in text
-    assert "лучше: Bystřice, суббота" in text
-    assert "  сб 12.09: средняя; вс 13.09: низкая — API30 24 мм" in text
-    assert "дождь на выходные: не ожидается" in text
+    assert "ШАНС на выходные:\n  Valmez — сб 55 %, вс 60 %\n  Bystřice — сб 35 %, вс 30 %\n" in text
+    assert "  Valmez 60 % (вс): API30 24 мм" in text
     assert not ISO_DATE.search(text)
+
+
+def test_a_far_peak_is_marked_as_a_guess():
+    item = summary(payload=brief(location(curve={9: 70})))
+    text = report_lib.render(item, send=True, reason="тест")
+    assert "максимум 70 % 21.09 (ориентировочно)" in text
+
+
+def test_a_peak_that_is_not_better_than_today_is_not_mentioned():
+    text = report_lib.render(summary(), send=True, reason="тест")
+    assert "максимум" not in text
 
 
 def test_every_phase_has_human_wording():
@@ -330,30 +472,42 @@ def test_every_phase_has_human_wording():
     assert phase_text("no_episode") == "подходящего дождя не было"
 
 
-def test_the_block_fits_a_telegram_message():
-    item = summary(
-        payload=brief(
-            location(),
-            location(slug="valasska-bystrice", name="Valašská Bystřice"),
+def test_twenty_locations_still_fit_a_telegram_message():
+    """PLAN §9: the whole point is a list that scales to ~20 forests."""
+    payload = brief(
+        *(
+            location(
+                slug=f"loc-{n}",
+                name=f"Valašská Location {n}",
+                short=None,
+                chance=5 + (n % 19) * 5,
+            )
+            for n in range(20)
         )
     )
-    text = report_lib.render(item, send=True, reason="первый запуск")
-    assert len(text.encode("utf-8")) <= 1536, len(text.encode("utf-8"))
+    text = report_lib.render(summary(payload=payload), send=True, reason="первый запуск")
+    assert len(text.splitlines()) == 20 + 9  # 20 chances + 9 fixed lines
+    assert len(text.encode("utf-8")) <= 2048, len(text.encode("utf-8"))
 
 
 def test_json_carries_the_same_fields(store):
-    item = summary(payload=brief(location(candidate=TODAY + timedelta(days=6))))
+    item = summary(payload=brief(location(curve={6: 70})))
     send, reason = report_lib.publish(store, item)
     payload = report_lib.to_json(item, send=send, reason=reason)
     assert payload["mode"] == "daily"
     assert payload["date"] == "2026-09-12"
     assert payload["send"] is True
     assert payload["header"] == "🍄 Грибной прогноз: 12.09"
+    assert payload["chance_title"] == "ШАНС на 12.09"
+    assert payload["chances"] == ["Valmez — 40 %"]
+    assert payload["detail"][0].startswith("Valmez 40 %: API30 24 мм")
     assert payload["phase_text"].startswith("дождь прошёл 11.09")
     assert payload["error_class"] == "none"
-    assert payload["rules_version"] == "3"
+    assert payload["rules_version"] == "4"
+    assert payload["locations"][0]["chance"] == 40
+    assert payload["locations"][0]["chance_peak"] == ["2026-09-18", 70]
     assert payload["locations"][0]["verdict"] == "medium"
-    assert payload["locations"][0]["prospect"] == "высокая через 6 дней (18.09)"
+    assert payload["locations"][0]["detailed"] is True
     assert payload["text"] == report_lib.render(item, send=send, reason=reason)
 
 
@@ -363,9 +517,10 @@ def test_the_stored_state_is_what_the_next_run_compares(store):
     row = store.last_report("daily")
     assert row["date"] == "2026-09-12"
     assert row["sent"] == 1
+    assert '"valmez": 40' in row["chances_json"]
     assert '"valmez": "medium"' in row["verdicts_json"]
     assert "2026-09-18" in row["candidates_json"]
-    assert row["rules_version"] == "3"
+    assert row["rules_version"] == "4"
     assert store.last_report("daily", before=TODAY) is None
 
 
@@ -396,3 +551,37 @@ def test_a_weekend_across_a_month_boundary_prints_both_months():
         today=date(2026, 10, 31),
     )
     assert report_lib._header(item).endswith("31.10–01.11")
+
+
+def test_many_capped_locations_are_counted_not_listed():
+    payload = brief(
+        *(
+            location(slug=f"loc-{n}", name=f"Location {n}", short=None, capped=True)
+            for n in range(7)
+        )
+    )
+    item = summary(payload=payload)
+    assert item["caveats"] == "без свежей станции шанс ограничен 50 %: 7 локаций"
+
+
+def test_a_long_list_of_reasons_is_trimmed(store):
+    """ПРИЧИНА explains the block; with twenty locations it must not bury it."""
+    payload = brief(
+        *(
+            location(slug=f"loc-{n}", name=f"Location {n}", short=None, chance=40)
+            for n in range(8)
+        )
+    )
+    report_lib.publish(store, report_lib.summarize(payload, mode="daily", today=FRIDAY))
+    moved = brief(
+        *(
+            location(slug=f"loc-{n}", name=f"Location {n}", short=None, chance=10)
+            for n in range(8)
+        )
+    )
+    send, reason = report_lib.publish(
+        store, report_lib.summarize(moved, mode="daily", today=TODAY)
+    )
+    assert send is True
+    assert reason.count(";") == 4
+    assert reason.endswith("ещё изменений: 4")

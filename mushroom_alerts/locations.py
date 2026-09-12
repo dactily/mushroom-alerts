@@ -1,13 +1,19 @@
 """Loading and editing ``locations.yaml``.
 
-The file is deliberately dumb -- name + coordinates (+ an optional short
-``slug`` when the natural slug is unwieldy).  Everything derived lives in
-SQLite, see ``store.Store.get_params`` and PLAN §2a.
+The file is deliberately dumb -- name + coordinates, plus an optional
+``slug`` when the natural slug is unwieldy and an optional ``short``, the
+display name the report prints.  Everything derived lives in SQLite, see
+``store.Store.get_params`` and PLAN §2a.
 
     - name: Valašské Meziříčí
       slug: valmez
+      short: Valmez
       lat: 49.4718
       lon: 17.9711
+
+**The order of the file is the order of the message** (PLAN §9): the user
+keeps the nearest and most convenient forests at the top, and nothing
+between here and the printed block may re-sort them.
 """
 
 from __future__ import annotations
@@ -79,7 +85,8 @@ def _parse(entry: dict, taken: set[str]) -> Location:
         slug = f"{base}-{n}"
         n += 1
     taken.add(slug)
-    return Location(name=name, lat=lat, lon=lon, slug=slug)
+    short = str(entry.get("short") or "").strip()
+    return Location(name=name, lat=lat, lon=lon, slug=slug, short=short)
 
 
 def load_locations(path: str | os.PathLike[str] | None = None) -> list[Location]:
@@ -106,14 +113,17 @@ def save_locations(
         entry: dict[str, object] = {"name": loc.name}
         if loc.slug != slugify(loc.name):
             entry["slug"] = loc.slug
+        if loc.short:
+            entry["short"] = loc.short
         entry["lat"] = loc.lat
         entry["lon"] = loc.lon
         payload.append(entry)
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(
-        "# Locations watched by mushroom-alerts. Name + coordinates only;\n"
-        "# everything derived (CHMU pixel, HoubyMapa cell, nearest stations)\n"
-        "# is cached in state.sqlite. Edit via `python -m mushroom_alerts add/del`.\n"
+        "# Locations watched by mushroom-alerts. Name + coordinates, plus an\n"
+        "# optional `short` name for the message; everything derived (CHMU pixel,\n"
+        "# HoubyMapa cell, nearest stations) is cached in state.sqlite. The order\n"
+        "# of this file is the order of the report. Edit via `add`/`del`.\n"
         + yaml.safe_dump(payload, allow_unicode=True, sort_keys=False, default_flow_style=False),
         encoding="utf-8",
     )

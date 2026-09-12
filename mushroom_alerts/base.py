@@ -9,9 +9,9 @@ Terminology
 Location
     A place the user cares about: name + coordinates + a stable ``slug``.
     ``locations.yaml`` holds only ``name``/``lat``/``lon`` (+ optional
-    ``slug``); everything derived (ČHMÚ pixel, HoubyMapa cell, nearest
-    stations) is cached in SQLite under that slug -- see PLAN §2a and
-    ``store.Store.get_params``/``set_params``.
+    ``slug`` and ``short``); everything derived (ČHMÚ pixel, HoubyMapa
+    cell, nearest stations) is cached in SQLite under that slug -- see
+    PLAN §2a and ``store.Store.get_params``/``set_params``.
 
 Reading
     Exactly one measured value, for one location, for one day, for one
@@ -214,15 +214,30 @@ class WindowAggregate:
 
 @dataclass(frozen=True, slots=True)
 class Location:
-    """A place we watch.  ``slug`` is the stable key used everywhere else."""
+    """A place we watch.  ``slug`` is the stable key used everywhere else.
+
+    ``short`` is the optional display name for the message: "Bystřice pod
+    Hostýnem" does not fit a one-line list of twenty forests, and it must
+    be chosen by the user, not guessed -- truncating to the last word turns
+    it into "Hostýnem" (PLAN §9f).
+    """
 
     name: str
     lat: float
     lon: float
     slug: str
+    short: str = ""
+
+    @property
+    def short_name(self) -> str:
+        """What the report prints: the explicit ``short``, or the full name."""
+        return self.short or self.name
 
     def as_dict(self) -> dict[str, Any]:
-        return {"name": self.name, "lat": self.lat, "lon": self.lon, "slug": self.slug}
+        out = {"name": self.name, "lat": self.lat, "lon": self.lon, "slug": self.slug}
+        if self.short:
+            out["short"] = self.short
+        return out
 
 
 @dataclass(slots=True)

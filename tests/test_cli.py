@@ -380,7 +380,7 @@ def test_status_json_serializes_the_populated_shared_view(monkeypatch, capsys):
     payload = json.loads(capsys.readouterr().out)
     view = payload["locations"][0]["view"]
     assert view["station"]["series_points"]["sra_mm"][TODAY.isoformat()]["value"] == 2.0
-    assert view["biological"]["rules_version"] == "3"
+    assert view["biological"]["rules_version"] == "4"
 
 
 def test_status_weekly_does_not_crash(capsys):

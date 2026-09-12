@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 
 from . import api30 as api30_lib
 from . import biology
+from . import chance as chance_lib
 from . import policy
 from .base import DataQuality, FetchResult, Location, Reading
 from .fetch_chmi_map import LEVEL_LABELS
@@ -413,6 +414,29 @@ def location_snapshot(
         threshold_mm=float(forecast.get("threshold_mm", policy.API30_THRESHOLD_MM)),
     )
     biological["guidance"] = assessment.as_dict()
+    biological["chance"] = chance_lib.assess_chance_horizon(
+        today,
+        {item.date: item.phase for item in assessment.outlook},
+        list(api_curve),
+        api30=api_curve,
+        api30_quality=api_qualities,
+        t_mean=forecast.get("t_mean") or {},
+        t_min=forecast.get("t_min") or {},
+        frost_present=bool(frost.get("present")),
+        # A stale map is no support: pass the level only while it is fresh,
+        # exactly as the verdict's map gate reads it.
+        chmi_level=(
+            float(out["chmi"]["level"]) if fresh_map(out["chmi"], CHMI_MAP) else None
+        ),
+        houbymapa_score=(
+            float(out["houbymapa"]["score"])
+            if (out["houbymapa"] or {}).get("score") is not None
+            and out["source_status"][HOUBYMAPA]["quality"] == DataQuality.FRESH.value
+            else None
+        ),
+        station_available=out["source_status"][STATION]["quality"]
+        in {DataQuality.FRESH.value, DataQuality.PARTIAL.value},
+    ).as_dict()
     dominant_id = assessment.current.dominant_event_id
     biological["rain_episode"] = next(
         (

@@ -355,6 +355,7 @@ def location_view(
 
     return {
         "name": location.name,
+        "short_name": location.short_name,
         "slug": slug,
         "lat": location.lat,
         "lon": location.lon,
@@ -481,6 +482,22 @@ def _history_lines(view: Mapping[str, Any]) -> list[str]:
     return out
 
 
+def _chance_text(chance: Mapping[str, Any] | None) -> str:
+    """``45 %; максимум 70 % 2026-09-18`` -- the comparable number (PLAN §9b)."""
+    if not chance or chance.get("today") is None:
+        return "нет данных"
+    today = int(chance["today"])
+    out = f"{today} %"
+    if chance.get("capped"):
+        out += f" (ограничен {policy.CHANCE_NO_STATION_CAP} %: станция недоступна)"
+    peak = chance.get("peak")
+    if peak and int(peak[1]) > today:
+        day = peak[0]
+        day = date.fromisoformat(str(day)) if isinstance(day, str) else day
+        out += f"; максимум {int(peak[1])} % {_iso(day)}"
+    return out
+
+
 def _biological_lines(view: Mapping[str, Any]) -> list[str]:
     bio = view.get("biological") or {}
     temp = bio.get("temperature_7d") or {}
@@ -495,6 +512,7 @@ def _biological_lines(view: Mapping[str, Any]) -> list[str]:
         f"  вердикт сегодня: {guidance.get('verdict_label', 'недостаточно данных')} "
         f"(rules v{bio.get('rules_version', '?')})"
     )
+    out.append(f"  шанс сегодня: {_chance_text(bio.get('chance'))}")
     out.append(f"  смысл: {guidance.get('scope_text', 'оценка условий участка')}")
     out.append(f"  фаза: {guidance.get('phase_text', 'недостаточно данных')}")
     out.append(
