@@ -416,7 +416,9 @@ def location_snapshot(
     biological["guidance"] = assessment.as_dict()
     biological["chance"] = chance_lib.assess_chance_horizon(
         today,
-        {item.date: item.phase for item in assessment.outlook},
+        # The chance ramps over the days since a rain instead of reading the
+        # phase word, so it needs the anchors, not the verdict's categories.
+        [episode.anchor for episode in episodes],
         list(api_curve),
         api30=api_curve,
         api30_quality=api_qualities,

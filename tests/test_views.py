@@ -412,13 +412,69 @@ def test_the_snapshot_carries_a_chance_next_to_the_verdict(tmp_path):
         bio = location_snapshot(store, VALMEZ, TODAY)["biological"]
 
     chance = bio["chance"]
+    # eight days after the rain the phase ramp is on its plateau:
     # 0.60 x 1.15 (API30 30 mm) x 1.12 (HoubyMapa 0.90) x 0.90 (ČHMÚ 3) = 69.6 %
     assert chance["today"] == 70
-    # the maps are today-only, so tomorrow is the bare 0.60 x 1.15 = 69 %
+    # the maps correct the place, so tomorrow carries them too, and one day
+    # out the lead-time damping is still 1.0: the same conditions, the same
+    # number
     assert chance["curve"][TODAY + timedelta(days=1)] == 70
     assert chance["peak"] == (TODAY, 70)
     assert chance["capped"] is False
     assert bio["guidance"]["verdict"] == "high"  # the verdict is untouched
+
+
+def test_a_poor_map_lowers_the_forecast_days_too(tmp_path):
+    """The maps are a property of the place (the verdict still drops them).
+
+    While they counted for today only, a location with ČHMÚ 1/5 scored 55 %
+    today and 70 % tomorrow on identical conditions, and the difference was
+    arithmetic, not weather.
+    """
+    api_curve = [
+        Reading(
+            "api30_forecast",
+            VALMEZ.slug,
+            TODAY + timedelta(days=offset),
+            "api30_mm",
+            30.0,
+            meta={
+                "quality": "fresh",
+                **({"issued": TODAY.isoformat()} if offset else {}),
+            },
+        )
+        for offset in (0, 1)
+    ]
+    temperatures = [
+        Reading(
+            "openmeteo",
+            VALMEZ.slug,
+            TODAY + timedelta(days=offset),
+            metric,
+            value,
+            meta={"issued": TODAY.isoformat()} if offset else None,
+        )
+        for offset in (0, 1)
+        for metric, value in (("t_mean", 14.0), ("t_min", 7.0))
+    ]
+    poor_map = [Reading("chmi_map", VALMEZ.slug, TODAY, "level", 1.0)]
+
+    with Store(tmp_path / "state.sqlite") as store:
+        store.upsert_readings(
+            _primary_window_readings() + poor_map, retrieved_at=stamp(5)
+        )
+        store.upsert_readings(temperatures, retrieved_at=stamp(6))
+        store.upsert_readings(api_curve, retrieved_at=stamp(7))
+        bio = location_snapshot(store, VALMEZ, TODAY)["biological"]
+
+    # 0.60 x 1.15 x 0.80 (ČHMÚ 1) = 55.2 %, today and tomorrow alike
+    assert bio["chance"]["today"] == 55
+    assert bio["chance"]["curve"][TODAY + timedelta(days=1)] == 55
+    # the verdict keeps its today-only map gate: no fresh high map blocks
+    # today, while tomorrow is judged without any map at all
+    assert bio["guidance"]["verdict"] != "high"
+    assert "no_fresh_high_map_support" in bio["guidance"]["high_blockers"]
+    assert bio["guidance"]["outlook"][1]["verdict"] == "high"
 
 
 def test_a_stale_station_caps_the_chance(tmp_path):

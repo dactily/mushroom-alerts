@@ -88,7 +88,9 @@ def location(
         },
         "forecast": {
             "days": days,
-            "today_mm": 23.7,
+            # the derived curve for today -- the number the chance used, and
+            # deliberately not the station's 23.7 mm
+            "today_mm": 35.9,
             "next_rain": (today + timedelta(days=5), 27.4),
         },
         "biological": {
@@ -329,10 +331,11 @@ def test_the_daily_block_has_every_field_and_no_iso_dates():
     assert "ФАЗА: дождь прошёл 11.09, условия для роста ожидаются с 18.09" in text
     assert "ПОДРОБНО (2 локации с лучшим шансом):" in text
     assert (
-        "  Valmez 40 %: API30 24 мм, HoubyMapa 4/5 (0.63), карта ČHMÚ 3/5, "
+        "  Valmez 40 %: API30 36 мм (расчёт), станция 24 мм, "
+        "HoubyMapa 4/5 (0.63), карта ČHMÚ 3/5, "
         "за 7 дней 26 мм; максимум 70 % 18.09\n" in text
     )
-    assert "  Bystřice 35 %: API30 24 мм" in text
+    assert "  Bystřice 35 %: API30 36 мм (расчёт), станция 24 мм" in text
     assert "ОГОВОРКИ: нет" in text
     assert not ISO_DATE.search(text)
     assert text.count("🍄") == 1
@@ -422,6 +425,32 @@ def test_a_capped_location_is_named_in_the_caveats_not_in_the_list():
     assert "ОГОВОРКИ: без свежей станции шанс ограничен 50 %: Valmez" in text
 
 
+def test_the_detail_line_prints_the_api30_the_chance_was_computed_from():
+    """Two numbers exist for today; the line used to print the other one.
+
+    The chance comes off the derived forecast curve (36 mm here), the
+    station reports what it measured (24 mm).  Printing only the station
+    number made the percentage impossible to reproduce.
+    """
+    payload = brief(location())
+    text = report_lib.render(summary(payload=payload), send=True, reason="тест")
+    assert "API30 36 мм (расчёт), станция 24 мм" in text
+
+    without_curve = brief(location())
+    without_curve["locations"][0]["forecast"]["today_mm"] = None
+    text = report_lib.render(
+        summary(payload=without_curve), send=True, reason="тест"
+    )
+    assert "API30 24 мм (станция)" in text
+
+    without_station = brief(location())
+    without_station["locations"][0]["station"]["api30_mm"] = None
+    text = report_lib.render(
+        summary(payload=without_station), send=True, reason="тест"
+    )
+    assert "API30 36 мм (расчёт), станции нет" in text
+
+
 def test_a_location_without_a_chance_says_so():
     payload = brief(location())
     payload["locations"][0]["biological"].pop("chance")
@@ -446,7 +475,7 @@ def test_the_weekend_block_speaks_about_both_days():
     text = report_lib.render(item, send=True, reason="тест")
     assert "ЗАГОЛОВОК: 🍄 Грибной прогноз на выходные 12–13.09" in text
     assert "ШАНС на выходные:\n  Valmez — сб 55 %, вс 60 %\n  Bystřice — сб 35 %, вс 30 %\n" in text
-    assert "  Valmez 60 % (вс): API30 24 мм" in text
+    assert "  Valmez 60 % (вс): API30 36 мм (расчёт), станция 24 мм" in text
     assert not ISO_DATE.search(text)
 
 
@@ -500,10 +529,12 @@ def test_json_carries_the_same_fields(store):
     assert payload["header"] == "🍄 Грибной прогноз: 12.09"
     assert payload["chance_title"] == "ШАНС на 12.09"
     assert payload["chances"] == ["Valmez — 40 %"]
-    assert payload["detail"][0].startswith("Valmez 40 %: API30 24 мм")
+    assert payload["detail"][0].startswith(
+        "Valmez 40 %: API30 36 мм (расчёт), станция 24 мм"
+    )
     assert payload["phase_text"].startswith("дождь прошёл 11.09")
     assert payload["error_class"] == "none"
-    assert payload["rules_version"] == "4"
+    assert payload["rules_version"] == "5"
     assert payload["locations"][0]["chance"] == 40
     assert payload["locations"][0]["chance_peak"] == ["2026-09-18", 70]
     assert payload["locations"][0]["verdict"] == "medium"
@@ -520,7 +551,7 @@ def test_the_stored_state_is_what_the_next_run_compares(store):
     assert '"valmez": 40' in row["chances_json"]
     assert '"valmez": "medium"' in row["verdicts_json"]
     assert "2026-09-18" in row["candidates_json"]
-    assert row["rules_version"] == "4"
+    assert row["rules_version"] == "5"
     assert store.last_report("daily", before=TODAY) is None
 
 

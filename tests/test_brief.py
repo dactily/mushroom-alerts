@@ -159,7 +159,7 @@ def test_render_has_every_section(tmp_path):
     assert "температура почвы: 5 см 17.6 °C, 10 см 17.7 °C" in text
     assert "влажность: 81 %" in text
     assert "биологическая оценка (детерминированная):" in text
-    assert "вердикт сегодня: средняя (rules v4)" in text
+    assert "вердикт сегодня: средняя (rules v5)" in text
     assert "шанс сегодня: 45 %" in text
     assert "не подтверждение отдельных плодовых тел" in text
     assert "возможная высокая вероятность:" in text

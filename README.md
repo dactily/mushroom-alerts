@@ -175,9 +175,11 @@ failures are soft by design.
   schema v5 adds the additive `reports.chances_json` column, the per-location
   percentages the send rule compares.
 - The application, not Hermes, calculates both the comparable chance in
-  percent (PLAN §9b: phase base x API30 band x temperature gate x frost x,
-  for today only, the two maps; rounded to 5 % inside 5-95 %, capped at 50 %
-  without a fresh station) and the conservative biological
+  percent (PLAN §9b: a ramp over the days since the rain anchor, the best
+  over all episodes, x a ramp over API30 x temperature gate x frost x both
+  maps, applied to every day as a correction of the place, x a lead-time
+  damping; rounded to 5 % inside 5-95 %, capped at 50 % without a fresh
+  station) and the conservative biological
   verdict. All qualifying rain episodes are retained; overlapping rolling
   windows from one wet spell are merged. An older active episode outranks a
   newer waiting episode. D+7...D+12 is the primary window, D+13...D+21 is a

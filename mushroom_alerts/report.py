@@ -184,9 +184,13 @@ def _location_summary(
     chmi = view.get("chmi") or {}
     houby = view.get("houbymapa") or {}
 
-    api30 = station.get("api30_mm")
-    if api30 is None:
-        api30 = forecast.get("today_mm")
+    # Two different API30 numbers exist for today, and the block used to
+    # print the wrong one: the chance is computed from the derived forecast
+    # curve, while the station reports what it measured.  They differ by a
+    # lot (36 mm against 24 mm on 12.09.2026), so the reader could not
+    # reproduce the percentage from the line that was meant to explain it.
+    api30 = forecast.get("today_mm")
+    api30_station = station.get("api30_mm")
 
     candidate = _as_date(guidance.get("candidate_high_date"))
 
@@ -237,7 +241,8 @@ def _location_summary(
             "primary_start": growth[0],
             "residual_end": episode.get("residual_window_end"),
         },
-        "api30_mm": api30,
+        "api30_mm": api30,  # what the chance was computed from
+        "api30_station_mm": api30_station,  # what the station measured
         "chmi_level": chmi.get("level"),
         "houbymapa_level": houby.get("level"),
         "houbymapa_score": houby.get("score"),
@@ -496,8 +501,23 @@ def _leaders(summary: Mapping[str, Any]) -> list[Mapping[str, Any]]:
     return [item for _, item in ordered[:DETAIL_LOCATIONS]]
 
 
+def _api30_fact(item: Mapping[str, Any]) -> str:
+    """``API30 36 мм (расчёт), станция 24 мм`` -- both, never one as both.
+
+    The chance uses the derived curve, so that number comes first and says
+    so; the measurement follows, because it is the one the cap is about.
+    One line either way.
+    """
+    used, measured = item["api30_mm"], item["api30_station_mm"]
+    if used is None:
+        return "API30 —" if measured is None else f"API30 {_mm(measured)} (станция)"
+    if measured is None:
+        return f"API30 {_mm(used)} (расчёт), станции нет"
+    return f"API30 {_mm(used)} (расчёт), станция {_mm(measured)}"
+
+
 def _facts(item: Mapping[str, Any]) -> str:
-    bits = [f"API30 {_mm(item['api30_mm'])}"]
+    bits = [_api30_fact(item)]
     houby = _level(item["houbymapa_level"])
     if houby and item["houbymapa_score"] is not None:
         bits.append(f"HoubyMapa {houby} ({item['houbymapa_score']:.2f})")
