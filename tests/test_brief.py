@@ -19,6 +19,7 @@ import pytest
 
 from mushroom_alerts import __main__ as cli
 from mushroom_alerts import brief as brief_lib
+from mushroom_alerts import locations as locations_lib
 from mushroom_alerts.base import Decision, FetchResult, Location, Reading
 from mushroom_alerts.store import Store
 
@@ -446,11 +447,14 @@ def test_cli_brief_mode_daily_prints_the_block_and_records_it(monkeypatch, capsy
     assert "ШАНС на " in out and "ФАЗА:" in out and "ОГОВОРКИ:" in out
     # only valmez has readings in these fixtures, so only valmez has a number
     assert "ПОДРОБНО (1 локация с лучшим шансом):" in out
-    assert "ОГОВОРКИ: нет свежего API30: Bystřice" in out
-    # both locations are listed, in the order of locations.yaml
-    assert out.index("Valmez — ") < out.index("Bystřice — ")
+    assert "ОГОВОРКИ: нет свежего API30: 8 локаций" in out
+    # all locations are listed, in the order of locations.yaml
+    short_names = [loc.short_name for loc in locations_lib.load_locations(SHIPPED)]
+    assert [out.index(f"{name} — ") for name in short_names] == sorted(
+        out.index(f"{name} — ") for name in short_names
+    )
     assert re.search(r"Valmez — \d+ %", out)
-    assert "Bystřice — нет данных" in out
+    assert all(f"{name} — нет данных" in out for name in short_names[1:])
     # no tables, no cheat sheet, no ISO dates
     assert "история 14 дн." not in out and "Как читать" not in out
     assert TODAY.isoformat() not in out
@@ -512,7 +516,9 @@ def test_cli_brief_mode_json(monkeypatch, capsys):
     assert payload["mode"] == "daily" and payload["send"] is True
     assert payload["exit_code"] == 0
     assert payload["date"] == TODAY.isoformat()
-    assert {loc["slug"] for loc in payload["locations"]} == {"valmez", "valasska-bystrice"}
+    assert [loc["slug"] for loc in payload["locations"]] == [
+        loc.slug for loc in locations_lib.load_locations(SHIPPED)
+    ]
     assert payload["text"].startswith("ОТПРАВЛЯТЬ: да")
 
 

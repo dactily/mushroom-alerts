@@ -7,6 +7,28 @@ import pytest
 from mushroom_alerts import locations as L
 
 SHIPPED = Path(__file__).resolve().parent.parent / "locations.yaml"
+SHIPPED_SLUGS = [
+    "valmez",
+    "jablunka",
+    "valasska-bystrice",
+    "maruska",
+    "benesky",
+    "kudlacena",
+    "kohutka",
+    "lidecko-lacnov",
+    "bumbalka",
+]
+SHIPPED_SHORTS = [
+    "Valmez",
+    "Jablůnka",
+    "Bystřice",
+    "Maruška",
+    "Benešky",
+    "Kudlačena",
+    "Kohútka",
+    "Lidečko",
+    "Bumbálka",
+]
 
 
 @pytest.mark.parametrize(
@@ -24,12 +46,12 @@ def test_slugify(name, slug):
     assert L.slugify(name) == slug
 
 
-def test_shipped_file_has_the_two_plan_locations():
+def test_shipped_file_has_the_watched_locations_in_report_order():
     locs = L.load_locations(SHIPPED)
-    assert [l.slug for l in locs] == ["valmez", "valasska-bystrice"]
+    assert [l.slug for l in locs] == SHIPPED_SLUGS
     assert (locs[0].lat, locs[0].lon) == (49.4718, 17.9711)
-    assert (locs[1].lat, locs[1].lon) == (49.416, 18.106)
-    assert [l.short_name for l in locs] == ["Valmez", "Bystřice"]
+    assert (locs[2].lat, locs[2].lon) == (49.416, 18.106)
+    assert [l.short_name for l in locs] == SHIPPED_SHORTS
 
 
 def test_a_short_name_is_explicit_and_never_guessed(tmp_path):
@@ -49,7 +71,7 @@ def test_a_short_name_survives_a_rewrite(tmp_path):
     path = tmp_path / "l.yaml"
     L.save_locations(L.load_locations(SHIPPED), path)
     assert "short: Valmez" in path.read_text(encoding="utf-8")
-    assert [l.short for l in L.load_locations(path)] == ["Valmez", "Bystřice"]
+    assert [l.short for l in L.load_locations(path)] == SHIPPED_SHORTS
 
 
 def test_load_missing_file(tmp_path):
@@ -60,7 +82,7 @@ def test_roundtrip_preserves_order_and_explicit_slug(tmp_path):
     path = tmp_path / "locations.yaml"
     L.save_locations(L.load_locations(SHIPPED), path)
     again = L.load_locations(path)
-    assert [x.slug for x in again] == ["valmez", "valasska-bystrice"]
+    assert [x.slug for x in again] == SHIPPED_SLUGS
     assert "slug: valmez" in path.read_text(encoding="utf-8")
 
 
@@ -75,7 +97,7 @@ def test_add_and_remove(tmp_path):
         L.add_location("Rožnov pod Radhoštěm", 49.0, 18.0, path)
 
     L.remove_location("roznov-pod-radhostem", path)
-    assert [x.slug for x in L.load_locations(path)] == ["valmez", "valasska-bystrice"]
+    assert [x.slug for x in L.load_locations(path)] == SHIPPED_SLUGS
 
     with pytest.raises(ValueError):
         L.remove_location("nowhere", path)

@@ -7,7 +7,43 @@
   short: Valmez
   lat: 49.4718
   lon: 17.9711
+- name: Jablůnka
+  slug: jablunka
+  short: Jablůnka
+  lat: 49.383553
+  lon: 17.950207
 - name: Valašská Bystřice
+  slug: valasska-bystrice
   short: Bystřice
   lat: 49.416
   lon: 18.106
+- name: Hošťálková – Maruška
+  slug: maruska
+  short: Maruška
+  lat: 49.3653
+  lon: 17.8286
+- name: Velké Karlovice – Benešky
+  slug: benesky
+  short: Benešky
+  lat: 49.397036
+  lon: 18.294392
+- name: Horní Bečva – Kudlačena
+  slug: kudlacena
+  short: Kudlačena
+  lat: 49.431801
+  lon: 18.325566
+- name: Nový Hrozenkov – Kohútka
+  slug: kohutka
+  short: Kohútka
+  lat: 49.295467
+  lon: 18.222954
+- name: Lidečko / Lačnov
+  slug: lidecko-lacnov
+  short: Lidečko
+  lat: 49.20948
+  lon: 18.052524
+- name: Bílá – Bumbálka
+  slug: bumbalka
+  short: Bumbálka
+  lat: 49.399167
+  lon: 18.410556
