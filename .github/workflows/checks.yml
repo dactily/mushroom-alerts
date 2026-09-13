@@ -1,0 +1,39 @@
+name: checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A newer push supersedes the older one; cancelling beats queueing behind a run
+# whose result nobody will read.
+concurrency:
+  group: checks-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Pinned by commit: setup-uv publishes no floating major tag, so `@v10` does not
+      # resolve at all.
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          # The version Hermes runs. pyproject's floor is 3.11 and the suite is green on
+          # 3.13 and 3.14 too, but a check that disagrees with production about the
+          # interpreter is worth less than one that does not.
+          python-version: "3.12"
+          enable-cache: true
+          # There is no uv.lock yet, so pyproject.toml is the whole resolution input.
+          cache-dependency-glob: pyproject.toml
+          # Keeps the managed CPython download off the critical path on reruns.
+          cache-python: true
+      # Pinned: ruff's default rule set widens between releases, and an unpinned
+      # `latest` turns a green branch red without a commit touching the code.
+      - run: uvx ruff@0.16.7 check .
+      - run: uv run --extra dev pytest -q
