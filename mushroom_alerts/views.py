@@ -23,7 +23,12 @@ OPENMETEO = "openmeteo"
 API30_FORECAST = api30_lib.FORECAST_SOURCE
 TZ = ZoneInfo("Europe/Prague")
 
-__all__ = ["location_snapshot", "forecast_bundle", "source_status"]
+__all__ = [
+    "location_snapshot",
+    "forecast_bundle",
+    "source_status",
+    "chance_moisture",
+]
 
 
 def _apply_run_status(
@@ -139,7 +144,7 @@ def _quality_of(value: Any) -> DataQuality:
         return DataQuality.MISSING
 
 
-def _chance_moisture(
+def chance_moisture(
     forecast: dict[str, Any],
     station: dict[str, Any] | None,
     station_status: dict[str, Any],
@@ -471,7 +476,7 @@ def location_snapshot(
         threshold_mm=float(forecast.get("threshold_mm", policy.API30_THRESHOLD_MM)),
     )
     biological["guidance"] = assessment.as_dict()
-    chance_api30, chance_qualities = _chance_moisture(
+    chance_api30, chance_qualities = chance_moisture(
         forecast, out["station"], out["source_status"][STATION], today
     )
     biological["chance"] = chance_lib.assess_chance_horizon(
