@@ -394,3 +394,162 @@ def test_empty_series_point_inside_an_episode_is_skipped():
 
     assert len(episodes) == 1
     assert episodes[0].anchor == TODAY - timedelta(days=7)
+
+
+# ----------------------------------------------------------------------
+# the second, gentler episode type: a soak
+# ----------------------------------------------------------------------
+def _soak_run(length: int, *, ending: int = 0, level: float = 25.0):
+    """``length`` days at ``level``, the last of them ``ending`` days ago."""
+    series = {TODAY - timedelta(days=n): 5.0 for n in range(0, 36)}
+    for n in range(ending, ending + length):
+        series[TODAY - timedelta(days=n)] = level
+    return series
+
+
+def test_a_slow_soaking_that_never_formed_a_pulse_is_still_an_episode():
+    """The Liberec case, 2026-09-13: API30 26–32 mm out of pure drizzle.
+
+    The best three-day window there held 7 mm, so ``detect_rain_episodes``
+    found nothing at all and the chance sat at its floor while both maps
+    called the place excellent.
+    """
+    drizzle = {TODAY - timedelta(days=n): 0.8 for n in range(0, 36)}
+    temperature = {day: 15.0 for day in drizzle}
+    assert biology.detect_rain_episodes("liberec", drizzle, temperature, TODAY) == ()
+
+    soaks = biology.detect_soak_episodes("liberec", _soak_run(14, level=28.0), TODAY)
+    assert len(soaks) == 1
+    assert soaks[0].days == 14
+    assert soaks[0].peak_mm == 28.0
+
+
+@pytest.mark.parametrize(
+    "length, found",
+    [(policy.RAIN_SOAK_DAYS - 1, 0), (policy.RAIN_SOAK_DAYS, 1), (20, 1)],
+)
+def test_a_soak_needs_its_full_run_of_days(length, found):
+    soaks = biology.detect_soak_episodes("forest", _soak_run(length), TODAY)
+    assert len(soaks) == found
+
+
+def test_the_soak_line_is_where_policy_puts_it():
+    line = policy.RAIN_SOAK_API30_MM
+    assert biology.detect_soak_episodes(
+        "forest", _soak_run(14, level=line - 0.1), TODAY
+    ) == ()
+    assert len(biology.detect_soak_episodes(
+        "forest", _soak_run(14, level=line), TODAY
+    )) == 1
+    # and it is deliberately below the pulse threshold: a soak never spikes
+    assert line < policy.API30_THRESHOLD_MM
+
+
+def test_a_soak_anchors_every_day_from_its_nth_on():
+    """One anchor per day it went on being wet, starting at the qualifying one.
+
+    A pulse has a single trigger day.  A soak has none, so each day of the
+    run opens its own growth window and the chance takes the maximum: while
+    the ground stays wet some window is always open.
+    """
+    soak = biology.detect_soak_episodes("forest", _soak_run(10), TODAY)[0]
+    assert soak.start == TODAY - timedelta(days=9)
+    assert soak.end == TODAY
+    assert soak.anchor == soak.start + timedelta(days=policy.RAIN_SOAK_DAYS - 1)
+    assert soak.anchors[0] == soak.anchor
+    assert soak.anchors[-1] == TODAY
+    assert len(soak.anchors) == 10 - policy.RAIN_SOAK_DAYS + 1
+    # this run's anchors are 0..3 days old, so its oldest window is still
+    # three days away -- the number climbs into it, it does not switch on
+    assert [(TODAY - anchor).days for anchor in soak.anchors] == [3, 2, 1, 0]
+    # a soak that has run for weeks always has one anchor inside the window
+    longer = biology.detect_soak_episodes("forest", _soak_run(25), TODAY)[0]
+    assert any(
+        policy.GROWTH_WINDOW_FROM_DAYS
+        <= (TODAY - anchor).days
+        <= policy.GROWTH_WINDOW_TO_DAYS
+        for anchor in longer.anchors
+    )
+
+
+def test_the_first_anchor_of_a_soak_is_a_day_old_so_nothing_jumps_overnight():
+    """Why the anchors start at the ``RAIN_SOAK_DAYS``-th day of the run.
+
+    Handing over the whole run would bring an anchor already a week old the
+    night a soak first qualifies, and the phase term would jump from its
+    floor to its plateau between two daily reports -- a ten-point move the
+    send rule would announce, caused by nothing happening.
+    """
+    just_qualified = biology.detect_soak_episodes(
+        "forest", _soak_run(policy.RAIN_SOAK_DAYS), TODAY
+    )[0]
+    assert just_qualified.anchors == (TODAY,)
+
+
+def test_a_soak_that_ended_keeps_its_last_anchor_and_ages_out():
+    soak = biology.detect_soak_episodes(
+        "forest", _soak_run(14, ending=10), TODAY
+    )[0]
+    assert soak.end == TODAY - timedelta(days=10)
+    assert max(soak.anchors) == soak.end
+
+
+def test_two_soaks_separated_by_a_dry_spell_stay_two():
+    series = {TODAY - timedelta(days=n): 5.0 for n in range(0, 36)}
+    for n in range(0, 8):
+        series[TODAY - timedelta(days=n)] = 30.0
+    for n in range(20, 30):
+        series[TODAY - timedelta(days=n)] = 30.0
+
+    soaks = biology.detect_soak_episodes("forest", series, TODAY)
+
+    assert [soak.days for soak in soaks] == [10, 8]
+    assert soaks[0].end < soaks[1].start
+
+
+def test_a_hole_in_api30_neither_breaks_a_soak_nor_counts_as_a_day():
+    """API30 is a thirty-day integral: one missing day is not a drought."""
+    series: dict[date, float | SeriesPoint | None] = dict(_soak_run(14))
+    gap = TODAY - timedelta(days=5)
+    series[gap] = SeriesPoint(
+        date=gap, value=None, source="chmi_station", quality=DataQuality.MISSING
+    )
+
+    soaks = biology.detect_soak_episodes("forest", series, TODAY)
+
+    assert len(soaks) == 1
+    assert soaks[0].days == 13  # the hole carried no value, so it is not one
+    assert soaks[0].start == TODAY - timedelta(days=13)
+    assert soaks[0].end == TODAY
+
+
+def test_a_soak_never_forms_in_the_forecast():
+    """Only days up to today count, exactly as for a rain pulse."""
+    series = {TODAY - timedelta(days=n): 5.0 for n in range(0, 36)}
+    series.update({TODAY + timedelta(days=n): 40.0 for n in range(1, 16)})
+
+    assert biology.detect_soak_episodes("forest", series, TODAY) == ()
+
+
+def test_the_soak_event_id_is_stable_and_distinct_from_a_pulse():
+    first = biology.detect_soak_episodes("forest", _soak_run(14), TODAY)[0]
+    again = biology.detect_soak_episodes("forest", _soak_run(14), TODAY)[0]
+    assert first.event_id == again.event_id
+    assert first.event_id.startswith("rain-")
+    pulses = _episodes((-14, 12.0), (-13, 12.0))
+    assert all(pulse.event_id != first.event_id for pulse in pulses)
+
+
+def test_a_soak_does_not_reach_the_categorical_verdict():
+    """The safety gate is untouched: it still wants a real rain episode.
+
+    ``assess_day`` takes the episodes it is given, and ``views`` gives it
+    only the pulses -- this is the contract that keeps soaks in the chance
+    and out of «высокая».
+    """
+    soaks = biology.detect_soak_episodes("forest", _soak_run(25), TODAY)
+    assert soaks and not isinstance(soaks[0], biology.RainEpisode)
+
+    assessment = _assess(TODAY, ())
+    assert assessment.phase == "no_episode"
+    assert "no_qualified_rain_episode" in assessment.high_blockers

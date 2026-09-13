@@ -29,9 +29,11 @@ from .quality import calendar_window
 
 __all__ = [
     "RainEpisode",
+    "SoakEpisode",
     "DayAssessment",
     "BiologicalAssessment",
     "detect_rain_episodes",
+    "detect_soak_episodes",
     "assess_day",
     "assess_horizon",
 ]
@@ -283,6 +285,131 @@ def detect_rain_episodes(
         for spell in _wet_spells(rain_points, today)
     )
     return tuple(episode for episode in built if episode is not None)
+
+
+@dataclass(frozen=True, slots=True)
+class SoakEpisode:
+    """A stand that went wet slowly and stayed wet -- the second episode type.
+
+    :func:`detect_rain_episodes` only sees a *pulse*:
+    :data:`policy.RAIN_EPISODE_MM` inside :data:`policy.RAIN_EPISODE_DAYS`.
+    Around Liberec on 2026-09-13 the station read API30 26–32 mm built out
+    of drizzle -- best three-day window 7 mm, 20 mm of rain in three weeks
+    -- so the ground was soaked and not one episode qualified, and the
+    chance sat at its floor while both published maps called the place
+    excellent.
+
+    ``start``..``end`` is the run of days whose API30 stayed at or above
+    :data:`policy.RAIN_SOAK_API30_MM`; the run must be at least
+    :data:`policy.RAIN_SOAK_DAYS` days long to be an episode at all.
+
+    This describes the **chance** only.  ``assess_day`` is a safety gate and
+    still wants a real rain episode; nothing here reaches it.
+    """
+
+    event_id: str
+    location: str
+    start: date
+    end: date
+    days: int
+    peak_mm: float
+
+    @property
+    def anchor(self) -> date:
+        """The first day the stand had already been wet long enough."""
+        return self.start + timedelta(days=policy.RAIN_SOAK_DAYS - 1)
+
+    @property
+    def anchors(self) -> tuple[date, ...]:
+        """Every day of the run from :attr:`anchor` on.
+
+        A pulse has one trigger day and one growth window.  A soak has no
+        trigger day at all, so it gets one anchor for every day it went on
+        being wet, and each of those opens its own window
+        :data:`policy.GROWTH_WINDOW_FROM_DAYS` later.  The chance already
+        takes the **maximum** of its phase ramp over the anchors it is
+        given, so handing it the whole run says exactly the right thing:
+        while the ground stays wet some window is always open, and once the
+        soak ends the newest of them ages out like any other.
+
+        Starting at :attr:`anchor` rather than at ``start`` is what keeps
+        the model continuous in time.  Were the whole run handed over, the
+        night a soak first qualified would bring an anchor already
+        :data:`policy.RAIN_SOAK_DAYS`-1 days old -- the phase term would
+        jump from its floor to its plateau between two daily reports.  As
+        written, the first anchor is a day old, and the number climbs into
+        the window over the following week exactly as a pulse's does.
+
+        A day the series carried no number for is included here for the
+        same reason it did not break the run: a hole in API30 is not
+        evidence that the ground dried out.
+        """
+        return tuple(
+            self.anchor + timedelta(days=n)
+            for n in range((self.end - self.anchor).days + 1)
+        )
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "event_id": self.event_id,
+            "start": self.start,
+            "end": self.end,
+            "date": self.anchor,
+            "days": self.days,
+            "peak_mm": self.peak_mm,
+            "threshold_mm": policy.RAIN_SOAK_API30_MM,
+            "growth_window": [
+                self.anchor + timedelta(days=policy.GROWTH_WINDOW_FROM_DAYS),
+                self.end + timedelta(days=policy.GROWTH_WINDOW_TO_DAYS),
+            ],
+        }
+
+
+def detect_soak_episodes(
+    location: str,
+    api30_points: Mapping[date, float | SeriesPoint | None],
+    today: date,
+) -> tuple[SoakEpisode, ...]:
+    """Runs of API30 at or above the soak line, oldest first.
+
+    ``api30_points`` is the API30 series the caller considers usable, which
+    in practice is the station's own published API30 for the days behind us
+    spliced with the derived curve -- the same numbers the moisture term
+    reads.  Only days up to ``today`` count: a soak that has not happened
+    yet is a forecast of an episode, and the pulse detector does not make
+    those either.
+
+    A day carrying no number is neither wet nor dry, exactly as in
+    :func:`_wet_spells`: API30 is a thirty-day integral, so one hole in it
+    is not evidence that the ground dried, and skipping the day neither
+    extends the run nor breaks it.  The run's length is counted in days
+    that actually carried a value.
+    """
+    runs: list[list[tuple[date, float]]] = []
+    current: list[tuple[date, float]] = []
+    for day in sorted(item for item in api30_points if item <= today):
+        value = _value(api30_points[day])
+        if value is None:
+            continue
+        if value >= policy.RAIN_SOAK_API30_MM:
+            current.append((day, value))
+            continue
+        if len(current) >= policy.RAIN_SOAK_DAYS:
+            runs.append(current)
+        current = []
+    if len(current) >= policy.RAIN_SOAK_DAYS:
+        runs.append(current)
+    return tuple(
+        SoakEpisode(
+            event_id=_event_id(f"{location}\0soak", run[0][0]),
+            location=location,
+            start=run[0][0],
+            end=run[-1][0],
+            days=len(run),
+            peak_mm=round(max(value for _, value in run), 1),
+        )
+        for run in runs
+    )
 
 
 def _phase(episode: RainEpisode, day: date) -> str:

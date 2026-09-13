@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from datetime import date, datetime, timedelta
-from typing import Any, Iterable, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 from zoneinfo import ZoneInfo
 
 from . import api30 as api30_lib
@@ -149,6 +149,7 @@ def chance_moisture(
     station: dict[str, Any] | None,
     station_status: dict[str, Any],
     today: date,
+    measured: Mapping[date, float] | None = None,
 ) -> tuple[dict[date, float], dict[date, DataQuality]]:
     """The API30 the chance may use, per day, with an honest quality.
 
@@ -165,6 +166,14 @@ def chance_moisture(
       derived curve for today is unusable and the station value is fresh or
       partial.  A forecast release going stale then costs the forecast days,
       not the day we actually have a measurement for.
+
+    ``measured`` is the station's own published API30 for the days already
+    behind us.  Those days never get a percentage of their own -- the
+    horizon starts at ``today`` -- but the chance needs them twice: the
+    moisture term averages a week ending on the day it judges, and
+    ``biology.detect_soak_episodes`` reads the same series.  They carry no
+    quality entry for exactly that reason: nothing ever asks whether such a
+    day may be *reported*, only what the ground was doing.
     """
     curve = dict(forecast.get("curve") or [])
     run_quality = _quality_of(forecast.get("api30_run_quality"))
@@ -185,6 +194,10 @@ def chance_moisture(
     ):
         curve[today] = float(station_value)
         qualities[today] = station_quality
+
+    for day, value in (measured or {}).items():
+        if day < today:
+            curve.setdefault(day, float(value))
     return curve, qualities
 
 
@@ -194,6 +207,7 @@ def _biological_features(
     today: date,
     sra_points: dict[date, Any],
     t_points: dict[date, Any],
+    api30_series: Mapping[date, float],
 ) -> tuple[dict[str, Any], tuple[biology.RainEpisode, ...]]:
     temperature = calendar_window(t_points, today, 7)
     frost_end = today - timedelta(days=1)
@@ -208,10 +222,11 @@ def _biological_features(
 
     episodes = biology.detect_rain_episodes(slug, sra_points, t_points, today)
 
-    api_rows = store.series(
-        STATION, slug, "api30_mm", since=today - timedelta(days=7), until=today
-    )
-    api_values = {row.date: float(row.value) for row in api_rows}
+    api_values = {
+        day: value
+        for day, value in api30_series.items()
+        if today - timedelta(days=7) <= day <= today
+    }
     latest_day = max(api_values) if api_values else None
     latest = None if latest_day is None else api_values[latest_day]
 
@@ -427,8 +442,16 @@ def location_snapshot(
     if forecast["openmeteo_run_id"] or forecast["api30_run_id"]:
         out["forecast"] = forecast
     _apply_run_status(out["source_status"], results, slug)
+    # The station's own published API30, over the whole history window: the
+    # moisture term averages a week ending on the day it judges, and the
+    # soak detector needs weeks of it, so one query serves both plus the
+    # short dynamics block.
+    measured_api30 = {
+        row.date: float(row.value)
+        for row in store.series(STATION, slug, "api30_mm", since=since, until=today)
+    }
     biological, episodes = _biological_features(
-        store, slug, today, sra_points, t_points
+        store, slug, today, sra_points, t_points, measured_api30
     )
     biological["rules_version"] = policy.RULES_VERSION
     biological["input_quality"] = {
@@ -477,13 +500,24 @@ def location_snapshot(
     )
     biological["guidance"] = assessment.as_dict()
     chance_api30, chance_qualities = chance_moisture(
-        forecast, out["station"], out["source_status"][STATION], today
+        forecast,
+        out["station"],
+        out["source_status"][STATION],
+        today,
+        measured_api30,
     )
+    # The second, gentler episode type, read off the same API30 series the
+    # moisture term uses.  It feeds the chance only: ``assess_horizon``
+    # above never sees it, because the categorical verdict is a safety gate
+    # and still wants a real rain episode.
+    soaks = biology.detect_soak_episodes(slug, chance_api30, today)
+    biological["soak_episodes"] = [soak.as_dict() for soak in soaks]
     biological["chance"] = chance_lib.assess_chance_horizon(
         today,
         # The chance ramps over the days since a rain instead of reading the
         # phase word, so it needs the anchors, not the verdict's categories.
-        [episode.anchor for episode in episodes],
+        [episode.anchor for episode in episodes]
+        + [anchor for soak in soaks for anchor in soak.anchors],
         list(api_curve),
         api30=chance_api30,
         api30_quality=chance_qualities,

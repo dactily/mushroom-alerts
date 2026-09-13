@@ -546,24 +546,30 @@ def _dates(payload: dict[str, Any]) -> dict[date, Any]:
 def chance_of(row: dict[str, Any], today: date) -> chance_lib.ChanceOutlook:
     """Recompute the chance for one cached row with the current ``policy``.
 
-    The rain episodes are re-derived rather than replayed: changing
-    ``RAIN_EPISODE_MM`` must move this number, otherwise the refit would be
-    measuring yesterday's model.  The wiring mirrors
-    ``views.location_snapshot`` -- same series, same anchors, same freshness
-    rules -- so a number here and a number from a live run of the same day
-    are the same number.
+    The episodes are re-derived rather than replayed: changing
+    ``RAIN_EPISODE_MM``, or the soak's two constants, must move this number,
+    otherwise the refit would be measuring yesterday's model.  The wiring
+    mirrors ``views.location_snapshot`` -- same series, same anchors, same
+    freshness rules -- so a number here and a number from a live run of the
+    same day are the same number.
     """
     sra = _points_from_payload(row["sra_points"], views.STATION)
     temp = _points_from_payload(row["t_mean_points"], views.STATION)
     episodes = biology.detect_rain_episodes(row["slug"], sra, temp, today)
-    api30 = {day: float(mm) for day, mm in _dates(row["chance_api30"]).items()}
+
+    curve = {day: float(mm) for day, mm in _dates(row["chance_api30"]).items()}
+    measured = {day: float(mm) for day, mm in _dates(row["measured_api30"]).items()}
+    api30 = {**{d: v for d, v in measured.items() if d < today}, **curve}
     quality = {
         day: DataQuality(q) for day, q in _dates(row["chance_api30_quality"]).items()
     }
+    soaks = biology.detect_soak_episodes(row["slug"], api30, today)
+    anchors = [episode.anchor for episode in episodes]
+    anchors += [anchor for soak in soaks for anchor in soak.anchors]
     return chance_lib.assess_chance_horizon(
         today,
-        [episode.anchor for episode in episodes],
-        sorted(api30),
+        anchors,
+        sorted(curve),
         api30=api30,
         api30_quality=quality,
         t_mean={day: float(v) for day, v in _dates(row["t_mean"]).items()},

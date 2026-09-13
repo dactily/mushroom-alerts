@@ -21,23 +21,64 @@ measurement.
 The verdict logic is deliberately untouched.  Both live side by side: the
 verdict says what may be claimed, the chance says where to drive.
 
-All of it is multiplicative, and every constant lives in :mod:`policy`::
+A weighted mean, not a product
+------------------------------
+Every constant lives in :mod:`policy`, and the arithmetic is::
 
-    episode ramp × moisture × temperature × frost
-                 × HoubyMapa × ČHMÚ × lead-time damping
+    score   = (w_moisture·moisture + w_phase·phase + w_map·map)
+            / (the weights of the contributions that had data)
+    percent = CHANCE_FULL_PCT · score
+            × temperature × frost × lead-time damping
+
+The phase used to be a **factor**, and that was the defect this shape
+exists for.  Outside a rain episode's window it was 0.05, so it multiplied
+everything else away: soaked ground plus two maps calling the place
+excellent still produced the 5 % floor.  Measured on 2026-09-13 over the
+eight strongest ČHMÚ zones of northern Czechia, seven of them scored 5–20 %
+while ČHMÚ said 5/5 and HoubyMapa 0.83–1.00 (``tools/sample_chmu.py``).
+A gate disguised as a multiplier.
+
+So the three contributions now *share* the number.  Each is 0..1, none can
+zero the others, and a contribution with no data drops out of both the sum
+and the divisor -- a location whose maps went stale stays comparable with
+one whose maps are fresh, instead of being quietly discounted.  What stayed
+multiplicative is what genuinely suppresses: a failed temperature gate,
+frost, and the distance into the forecast.
+
+Moisture is a week, not a morning
+---------------------------------
+``moisture`` reads the mean API30 of the last
+:data:`policy.CHANCE_MOISTURE_DAYS` days, not the day's own value.  Over
+the country sample a single day's API30 hardly separated the ČHMÚ levels at
+all (Spearman 0.32; medians 22 / 27 / 28 / 32 mm for levels 2–5) because a
+first rain on ground that had been dry for weeks looks exactly like ground
+that has been wet all month.  The week mean separates them (0.70; 15 / 22 /
+24 / 33 mm), and it is the mycological statement as well: what fruits is
+ground that has *stayed* wet.  A fresh soaking still lifts the number the
+day it falls -- it enters the mean immediately and fills it over the week,
+while the phase term opens seven days later.
+
+Two kinds of episode
+--------------------
+``days_since_anchor`` now carries the anchors of both kinds:
+``biology.detect_rain_episodes`` for a downpour and
+``biology.detect_soak_episodes`` for a stand that went wet slowly and
+stayed wet.  Around Liberec the station had API30 26–32 mm out of drizzle,
+best three-day window 7 mm: no pulse, wet ground, and the old model called
+it 10 %.  The **maximum** over the anchors wins, as before.
 
 Ramps, not steps
 ----------------
-Three of those factors used to be step functions, and every step was a lie
+Three parts of this used to be step functions, and every step was a lie
 the output could not hide:
 
-* the phase base jumped 0.15 → 0.60 the morning a window opened, so a curve
-  went 15 % → 75 % overnight -- mushrooms ramp up over days, so the base is
-  now :data:`policy.CHANCE_PHASE_RAMP`, a piecewise-linear function of the
+* the phase term jumped 0.15 → 0.60 the morning a window opened, so a curve
+  went 15 % → 75 % overnight -- mushrooms ramp up over days, so it is now
+  :data:`policy.CHANCE_PHASE_RAMP`, a piecewise-linear function of the
   days since the rain anchor.  With several episodes the **maximum** over
   them wins: a place can already be in an older rain's window while a newer
   rain is still in its waiting phase;
-* the moisture bands gave 28.0 mm and 35.9 mm the same ×1.15 and then
+* the moisture bands gave 28.0 mm and 35.9 mm the same value and then
   jumped by a third at one edge; API30 now enters through
   :data:`policy.CHANCE_MOISTURE_RAMP`, so the wetter place always scores
   higher.  :data:`policy.API30_BANDS_MM` stays, as the human-readable
@@ -46,8 +87,8 @@ the output could not hide:
   certainty it is not -- :data:`policy.CHANCE_HORIZON_DAMPING` now scales
   by lead time.
 
-A consequence worth stating: because the base is continuous, **a day can no
-longer be reproduced from the phase word alone**.  ``waiting`` covers
+A consequence worth stating: because the terms are continuous, **a day can
+no longer be reproduced from the phase word alone**.  ``waiting`` covers
 everything from the day of the rain to the day before the window opens, and
 those are different numbers now.  The categorical phase string stays in the
 output for the message wording; the arithmetic is in the ``factors``
@@ -76,18 +117,20 @@ Maps are a property of the place, not of the day
 for future days, and that is right for a safety gate.  Doing the same in
 the chance made days incomparable: identical conditions scored higher
 tomorrow than today, because today's ČHMÚ 3/5 cost ×0.9 and tomorrow's cost
-nothing, and ``максимум`` could be a pure artefact of that.  So the two map
-multipliers are applied to *every* day of the horizon as a per-location
+nothing, and ``максимум`` could be a pure artefact of that.  So the map
+contribution counts on *every* day of the horizon as a per-location
 correction ("поправка места по сегодняшним картам"): what the maps mostly
 encode is terrain and soil, whose relative ranking between locations
 outlives the forecast.  A stale map still contributes nothing -- the caller
-passes ``None`` for it, exactly as before.
+passes ``None`` for it, exactly as before -- and with both of them stale
+the whole term drops out and its weight goes to the other two, which is
+what makes such a location comparable rather than merely poorer.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from typing import Any, Mapping, Sequence
 
 from . import policy
@@ -115,6 +158,13 @@ class DayChance:
     ``value`` is ``None`` when the day had no usable API30.  Nothing was
     computed in that case: ``raw_percent`` is ``None``, ``factors`` is
     empty, and ``reason`` carries :data:`NO_API30` or :data:`STALE_API30`.
+
+    ``factors`` explains the arithmetic in the order it happens: the three
+    weighted contributions, then ``blend`` -- the weighted mean they
+    produced, i.e. the fraction of :data:`policy.CHANCE_FULL_PCT` this day
+    earned -- then whatever multiplied it afterwards.  ``moisture_mm`` is
+    the week mean the moisture contribution was read from, so the printed
+    number can be reproduced by hand.
     """
 
     date: date | None
@@ -124,6 +174,7 @@ class DayChance:
     factors: tuple[tuple[str, float], ...]
     insufficient: bool = False
     reason: str = ""
+    moisture_mm: float | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -136,6 +187,9 @@ class DayChance:
             "factors": [list(item) for item in self.factors],
             "insufficient": self.insufficient,
             "reason": self.reason,
+            "moisture_mm": (
+                None if self.moisture_mm is None else round(self.moisture_mm, 2)
+            ),
         }
 
 
@@ -165,6 +219,15 @@ class ChanceOutlook:
             "curve": {item.date: item.value for item in self.outlook},
             "peak": None if peak is None else (peak.date, peak.value),
             "capped": self.capped,
+            # The week the moisture contribution was read from.  The report
+            # prints it next to today's own API30, because since the term
+            # became a week mean the day's number alone no longer lets a
+            # reader reproduce the percentage that is meant to explain it.
+            "moisture_mm": (
+                None
+                if self.current.moisture_mm is None
+                else round(self.current.moisture_mm, 1)
+            ),
         }
 
 
@@ -193,13 +256,17 @@ def _quality(value: DataQuality | str | None) -> DataQuality:
         return DataQuality.MISSING
 
 
-def _phase_factor(days_since_anchor: Sequence[float]) -> float:
-    """:data:`policy.CHANCE_PHASE_RAMP` over the best of the episodes.
+def _phase_term(days_since_anchor: Sequence[float]) -> float:
+    """:data:`policy.CHANCE_PHASE_RAMP` over the best of the anchors.
 
     The maximum, not the newest and not the latest: an older rain whose
     window is open now must not be hidden by a fresh rain that is still in
-    its waiting phase.  A place with no episode at all is treated as one
-    whose window is long over -- the last knot of the ramp.
+    its waiting phase.  The same maximum is what keeps a running soak in
+    its window, since a soak hands over one anchor per day it lasted.
+
+    A place with no episode at all is treated as one whose window is long
+    over -- the last knot of the ramp.  Not zero: "no fresh trigger" is a
+    statement about the timing, not a veto on the other contributions.
     """
     if not days_since_anchor:
         return policy.CHANCE_PHASE_RAMP[-1][1]
@@ -226,9 +293,45 @@ def _unusable_reason(
     return ""
 
 
-def _moisture_factor(api30_mm: float) -> float:
-    """:data:`policy.CHANCE_MOISTURE_RAMP` at this API30."""
-    return _ramp(policy.CHANCE_MOISTURE_RAMP, float(api30_mm))
+def _moisture_mm(api30_mm: float, api30_week: Sequence[float]) -> float:
+    """Mean API30 of the moisture window, ending on this day.
+
+    ``api30_week`` are the days *before* it, newest first; only the first
+    :data:`policy.CHANCE_MOISTURE_DAYS`-1 of them count, and days the
+    caller had no usable number for are simply absent, so a short history
+    averages over what there is instead of inventing dry days.
+    """
+    values = [float(api30_mm), *(float(v) for v in api30_week)]
+    window = values[: max(1, policy.CHANCE_MOISTURE_DAYS)]
+    return sum(window) / len(window)
+
+
+def _moisture_term(moisture_mm: float) -> float:
+    """:data:`policy.CHANCE_MOISTURE_RAMP` at this week mean."""
+    return _ramp(policy.CHANCE_MOISTURE_RAMP, float(moisture_mm))
+
+
+def _map_term(
+    chmi_level: float | None, houbymapa_score: float | None
+) -> float | None:
+    """The mean of whichever published map is fresh, or ``None`` for neither.
+
+    ČHMÚ is normalised by :data:`policy.CHANCE_CHMI_RAMP`; HoubyMapa's score
+    is already 0..1 and is left alone.  Rescaling it onto ČHMÚ's levels
+    would be the one thing this model must not do -- it is an independent
+    model, and averaging the two is how their disagreement gets a price.
+    """
+    terms = [
+        term
+        for term in (
+            None
+            if chmi_level is None
+            else _ramp(policy.CHANCE_CHMI_RAMP, float(chmi_level)),
+            None if houbymapa_score is None else float(houbymapa_score),
+        )
+        if term is not None
+    ]
+    return sum(terms) / len(terms) if terms else None
 
 
 def _temperature_ok(t_mean: float | None, t_min: float | None) -> bool:
@@ -258,14 +361,22 @@ def assess_day_chance(
     chmi_level: float | None,
     houbymapa_score: float | None,
     station_available: bool,
+    api30_week: Sequence[float] = (),
     lead_days: float = 0,
     day: date | None = None,
 ) -> DayChance:
     """Evaluate one day.  Pure: same inputs, same number, always.
 
-    ``days_since_anchor`` is the age of this day against every known rain
-    episode, in days; an empty sequence means no qualifying rain at all.
-    ``lead_days`` is ``day - today``; a past day damps by nothing.
+    ``days_since_anchor`` is the age of this day against every known
+    episode, in days -- pulses and soaks together; an empty sequence means
+    no qualifying rain at all.  ``lead_days`` is ``day - today``; a past day
+    damps by nothing.
+
+    ``api30_mm`` is this day's own API30: it decides whether the day may
+    have a number at all, and it is the newest member of the moisture
+    window.  ``api30_week`` are the days before it, newest first, already
+    filtered to values the caller considers usable; leaving it empty judges
+    the day on itself alone.
 
     ``frost_present`` only lowers the chance when frost was actually
     measured; an incomplete minimum-temperature history is not evidence of
@@ -274,7 +385,7 @@ def assess_day_chance(
     freshness is the caller's read model, not arithmetic.
 
     Without a usable ``api30_mm`` the day gets no number at all: see the
-    module docstring for why a neutral multiplier was worse than silence.
+    module docstring for why a neutral value was worse than silence.
     """
     reason = _unusable_reason(api30_mm, api30_quality)
     if reason:
@@ -288,40 +399,48 @@ def assess_day_chance(
             reason=reason,
         )
 
-    factors: list[tuple[str, float]] = [("phase", _phase_factor(days_since_anchor))]
-
     # An empty ``reason`` already guarantees a number to stand on.
-    factors.append(("moisture", _moisture_factor(float(api30_mm))))  # type: ignore[arg-type]
+    moisture_mm = _moisture_mm(float(api30_mm), api30_week)  # type: ignore[arg-type]
+    contributions: list[tuple[str, float, float]] = [
+        ("moisture", policy.CHANCE_WEIGHT_MOISTURE, _moisture_term(moisture_mm)),
+        ("phase", policy.CHANCE_WEIGHT_PHASE, _phase_term(days_since_anchor)),
+    ]
+    # The maps correct the place, so they apply to every day of the horizon;
+    # with neither of them fresh the term drops out and the two remaining
+    # weights are renormalised, rather than counting as a zero.
+    map_term = _map_term(chmi_level, houbymapa_score)
+    if map_term is not None:
+        contributions.append(("map", policy.CHANCE_WEIGHT_MAP, map_term))
+
+    total_weight = sum(weight for _, weight, _ in contributions)
+    blend = (
+        sum(weight * term for _, weight, term in contributions) / total_weight
+        if total_weight > 0
+        else 0.0
+    )
+
+    # What is left really does multiply: a failed temperature gate, frost
+    # and the distance into the forecast suppress a number, they do not
+    # vote on it.
+    multipliers: list[tuple[str, float]] = []
     if not _temperature_ok(t_mean, t_min):
-        factors.append(("temperature", policy.CHANCE_TEMPERATURE_FAILED))
+        multipliers.append(("temperature", policy.CHANCE_TEMPERATURE_FAILED))
     if frost_present:
-        factors.append(("frost", policy.CHANCE_FROST))
-    # The maps correct the place, so they apply to every day of the horizon.
-    if houbymapa_score is not None:
-        factors.append(
-            (
-                "houbymapa",
-                policy.CHANCE_HOUBYMAPA_BASE
-                + policy.CHANCE_HOUBYMAPA_SPAN * float(houbymapa_score),
-            )
-        )
-    if chmi_level is not None:
-        factors.append(
-            (
-                "chmi_map",
-                policy.CHANCE_CHMI_BASE
-                + policy.CHANCE_CHMI_STEP
-                * (float(chmi_level) - policy.CHANCE_CHMI_PIVOT),
-            )
-        )
-    factors.append(
+        multipliers.append(("frost", policy.CHANCE_FROST))
+    multipliers.append(
         ("horizon", _ramp(policy.CHANCE_HORIZON_DAMPING, float(lead_days)))
     )
 
-    raw = 1.0
-    for _, factor in factors:
-        raw *= factor
-    percent = raw * 100.0
+    percent = policy.CHANCE_FULL_PCT * blend
+    for _, factor in multipliers:
+        percent *= factor
+    raw_percent = percent
+
+    factors: list[tuple[str, float]] = [
+        (name, term) for name, _, term in contributions
+    ]
+    factors.append(("blend", blend))
+    factors.extend(multipliers)
 
     capped = not station_available and percent > policy.CHANCE_NO_STATION_CAP
     if capped:
@@ -331,9 +450,10 @@ def assess_day_chance(
     return DayChance(
         date=day,
         value=value,
-        raw_percent=raw * 100.0,
+        raw_percent=raw_percent,
         capped=capped,
         factors=tuple(factors),
+        moisture_mm=moisture_mm,
     )
 
 
@@ -361,15 +481,33 @@ def assess_chance_horizon(
 ) -> ChanceOutlook:
     """Today and every forecast day, on one ramp and one set of maps.
 
-    ``anchors`` are the peak days of the known rain episodes -- the same
-    episodes the verdict reasons about, reduced to what the ramp needs.
+    ``anchors`` are the anchor days of the known episodes -- the peaks of
+    the rain pulses the verdict reasons about, plus every anchor day of a
+    soak (``biology.SoakEpisode.anchors``), reduced to what the ramp needs.
+
+    ``api30`` **may reach back before ``today``**, and should: the moisture
+    term averages :data:`policy.CHANCE_MOISTURE_DAYS` days ending on the
+    day judged, so the first week of the horizon is read partly off the
+    days behind us.  Only ``days`` decides which days get a number, so the
+    extra history never turns into extra rows; the caller is expected to
+    have put only usable values in there, exactly as it does for the maps.
     """
     ordered = sorted({today, *(day for day in days if day >= today)})
+
+    def week_before(day: date) -> list[float]:
+        """The usable API30 of the days before ``day``, newest first."""
+        return [
+            value
+            for offset in range(1, policy.CHANCE_MOISTURE_DAYS)
+            if (value := api30.get(day - timedelta(days=offset))) is not None
+        ]
+
     outlook = tuple(
         assess_day_chance(
             days_since_anchor=[(day - anchor).days for anchor in anchors],
             api30_mm=api30.get(day),
             api30_quality=api30_quality.get(day),
+            api30_week=week_before(day),
             t_mean=t_mean.get(day),
             t_min=t_min.get(day),
             frost_present=frost_present,

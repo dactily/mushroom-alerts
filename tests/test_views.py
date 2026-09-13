@@ -467,9 +467,10 @@ def test_a_poor_map_lowers_the_forecast_days_too(tmp_path):
         store.upsert_readings(api_curve, retrieved_at=stamp(7))
         bio = location_snapshot(store, VALMEZ, TODAY)["biological"]
 
-    # 0.60 x 1.15 x 0.80 (ČHMÚ 1) = 55.2 %, today and tomorrow alike
-    assert bio["chance"]["today"] == 55
-    assert bio["chance"]["curve"][TODAY + timedelta(days=1)] == 55
+    # 0.40x0.70 (30 mm) + 0.30x1.00 (the window) + 0.30x0.00 (ČHMÚ 1/5)
+    # = 0.58 of 90 % = 52.2 %, today and tomorrow alike
+    assert bio["chance"]["today"] == 50
+    assert bio["chance"]["curve"][TODAY + timedelta(days=1)] == 50
     # the verdict keeps its today-only map gate: no fresh high map blocks
     # today, while tomorrow is judged without any map at all
     assert bio["guidance"]["verdict"] != "high"
@@ -546,15 +547,15 @@ def _chance_of(tmp_path, rain: dict[int, float], name: str) -> dict:
 def test_a_second_rain_does_not_hide_an_open_growth_window(tmp_path):
     """More rain must never mean a lower chance (the merging defect).
 
-    25 mm seven days ago put today inside D+7..D+12 and scored 65 %.  Adding
-    30 mm two days ago used to merge both rains into one episode anchored on
-    the newer one, which is still waiting: 10 %, for strictly more water.
+    25 mm seven days ago puts today inside D+7..D+12.  Adding 30 mm two days
+    ago used to merge both rains into one episode anchored on the newer one,
+    which is still waiting: 10 %, for strictly more water.
     """
     one = _chance_of(tmp_path, {-7: 25.0}, "one")
     two = _chance_of(tmp_path, {-7: 25.0, -2: 30.0}, "two")
 
-    assert one["chance"]["today"] == 65
-    assert two["chance"]["today"] == 65
+    assert one["chance"]["today"] == 70
+    assert two["chance"]["today"] == 70
     assert len(one["rain_episodes"]) == 1
     assert [item["date"] for item in two["rain_episodes"]] == [
         TODAY - timedelta(days=7),
@@ -575,7 +576,7 @@ CHMI_3 = [Reading("chmi_map", VALMEZ.slug, TODAY, "level", 3.0)]
 
 
 def test_losing_the_api30_takes_the_number_away_instead_of_raising_it(tmp_path):
-    """45 % with 20 mm, and 55 % with nothing -- ten points for lost data."""
+    """A number with 20 mm, and a *higher* one with nothing -- for lost data."""
     with Store(tmp_path / "with.sqlite") as store:
         store.upsert_readings(_rain_history(OPEN_WINDOW) + CHMI_3, retrieved_at=stamp(5))
         store.upsert_readings(_flat_weather(), retrieved_at=stamp(6))
@@ -587,7 +588,8 @@ def test_losing_the_api30_takes_the_number_away_instead_of_raising_it(tmp_path):
         store.upsert_readings(_flat_weather(), retrieved_at=stamp(6))
         blind = location_snapshot(store, VALMEZ, TODAY)["biological"]["chance"]
 
-    assert measured["today"] == 45  # 0.60 x 0.8 (20 mm) x 0.9 (ČHMÚ 3/5)
+    # 0.40x0.383 (20 mm) + 0.30x1.00 + 0.30x0.50 (ČHMÚ 3/5) = 0.603 of 90 %
+    assert measured["today"] == 55
     assert blind["today"] is None
     assert blind["peak"] is None
     assert blind["capped"] is False
@@ -617,11 +619,11 @@ def test_today_falls_back_to_the_station_when_the_run_is_stale(tmp_path):
 
     bio = snap["biological"]
     assert snap["forecast"]["api30_run_quality"] == "stale"
-    # the station's own 20 mm, not the stale curve's 28 mm (which scored 60 %)
-    assert bio["chance"]["today"] == 45
-    assert set(bio["chance"]["curve"].values()) == {45, None}
+    # the station's own 20 mm, not the stale curve's 28 mm (which scores 65 %)
+    assert bio["chance"]["today"] == 55
+    assert set(bio["chance"]["curve"].values()) == {55, None}
     assert bio["chance"]["curve"][TODAY + timedelta(days=1)] is None
-    assert bio["chance"]["peak"] == (TODAY, 45)
+    assert bio["chance"]["peak"] == (TODAY, 55)
     assert "forecast_not_fresh" in bio["guidance"]["high_blockers"]
 
 
@@ -634,6 +636,7 @@ def test_an_empty_database_has_no_number_to_report(tmp_path):
         "curve": {TODAY: None},
         "peak": None,
         "capped": False,
+        "moisture_mm": None,
     }
 
 
@@ -662,4 +665,5 @@ def test_a_stale_station_caps_the_chance(tmp_path):
         "curve": {TODAY: 50},
         "peak": (TODAY, 50),
         "capped": True,
+        "moisture_mm": 30.0,
     }
