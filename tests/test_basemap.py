@@ -17,6 +17,7 @@ import pytest
 
 from mushroom_alerts.locations import load_locations
 from mushroom_alerts.mapping import basemap as B
+from mushroom_alerts.mapping.render import COLOR_NONE, COLOR_STOPS
 
 REPO = Path(__file__).resolve().parent.parent
 SHIPPED_LOCATIONS = REPO / "locations.yaml"
@@ -24,6 +25,11 @@ SHIPPED_LOCATIONS = REPO / "locations.yaml"
 #: Every watched location must sit this far inside the picture, so the
 #: marker (and its halo) has room and never straddles the border.
 MIN_MARGIN_KM = 2.0
+
+#: What the renderer paints on top of this map: the three stops of the
+#: chance scale and the grey for "no number".  Imported rather than copied,
+#: so a repainted scale cannot quietly stop reading against the background.
+MARKER_FILLS = tuple(colour for _, colour in COLOR_STOPS) + (COLOR_NONE,)
 
 
 @pytest.fixture(scope="module")
@@ -38,6 +44,11 @@ def from_pixel(bm: B.Basemap, x: float, y: float) -> tuple[float, float]:
     lon = math.degrees((x / bm.width * (x1 - x0) + x0) / B.EARTH_RADIUS_M)
     lat = B.inverse_mercator_y(y1 - y / bm.height * (y1 - y0))
     return lat, lon
+
+
+def luminance(colour: tuple[int, int, int]) -> float:
+    """ITU-R 601-2 luma -- the same weights ``Image.convert("L")`` uses."""
+    return 0.299 * colour[0] + 0.587 * colour[1] + 0.114 * colour[2]
 
 
 def km_between(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -74,11 +85,12 @@ def test_the_png_is_small_enough_to_commit(bm):
 
 def test_the_sidecar_records_how_it_was_built():
     data = json.loads(B.DEFAULT_BASEMAP.read_text(encoding="utf-8"))
+    layers = {"forest", "settlements", "water", "roads", "places"}
     assert data["projection"] == "EPSG:3857"
-    assert {"forest", "water", "roads", "places"} == {l["name"] for l in data["layers"]}
+    assert layers == {l["name"] for l in data["layers"]}
     assert all(layer["drawn"] > 0 for layer in data["layers"])
     names = {q["name"] for q in data["overpass_queries"]}
-    assert names == {"forest", "water", "roads", "places"}
+    assert names == layers
     assert all("out geom;" in q["query"] for q in data["overpass_queries"])
 
 
@@ -254,12 +266,24 @@ def test_open_image_hands_out_a_private_copy(bm):
     assert second is not first
 
 
-def test_the_map_is_a_light_map(bm):
-    """The markers are the loud part; a dark basemap would swallow them."""
-    histogram = bm.open_image().histogram()  # three bands of 256 buckets
-    total = bm.width * bm.height * 3
-    average = sum(histogram[i] * (i % 256) for i in range(768)) / total
-    assert average > 200
+def test_the_map_stays_the_paper_under_the_markers(bm):
+    """The markers are the loud part; a dark basemap would swallow them.
+
+    Not "the map is nearly white" -- it carries forest, rivers, roads and
+    towns on purpose, and the flat version of it that was nearly white said
+    nothing at all at the 390 px width Telegram previews a photo at.  What
+    still has to hold is what the renderer actually leans on: whatever the
+    map is made of, it is the paper and the markers are the ink.  So the
+    map's average tone sits above the *lightest* fill a marker can have
+    (amber, 50 %), and next to none of it is as dark as the darkest one.
+    """
+    grey = bm.open_image().convert("L")
+    histogram = grey.histogram()
+    total = bm.width * bm.height
+    average = sum(value * count for value, count in enumerate(histogram)) / total
+    assert average > max(luminance(fill) for fill in MARKER_FILLS)
+    darkest = min(luminance(fill) for fill in MARKER_FILLS)
+    assert sum(histogram[: int(darkest) + 1]) / total < 0.01
 
 
 # -- loading -------------------------------------------------------------

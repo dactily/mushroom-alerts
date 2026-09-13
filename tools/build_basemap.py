@@ -8,10 +8,10 @@ on it, with no network and no tiles -- see
 
     .venv/bin/python tools/build_basemap.py
 
-It asks Overpass for four layers (forest, water, roads, towns) inside a box
-a little larger than the map, draws them with Pillow at 2x and downsamples,
-and writes ``assets/basemap/vsetinsko.png`` plus a ``.json`` sidecar that
-records the bounding box, the queries and the layer counts.
+It asks Overpass for five layers (forest, settlements, water, roads, places)
+inside a box a little larger than the map, draws them with Pillow at 2x and
+downsamples, and writes ``assets/basemap/vsetinsko.png`` plus a ``.json``
+sidecar that records the bounding box, the queries and the layer counts.
 
 The build is deterministic: with the same cached Overpass answers it writes
 a byte-identical PNG, so a rerun that changes nothing shows an empty diff.
@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import sys
 import time
 from dataclasses import dataclass, field
@@ -75,33 +76,82 @@ RETRY_SLEEP = 30.0
 POLITE_SLEEP = 5.0
 SOURCE = f"OpenStreetMap via Overpass API ({OVERPASS_URL})"
 
-# -- colours (a light, quiet map: the markers on top must be the loud bit) --
+# -- colours -------------------------------------------------------------
+#
+# The markers on top are 34 px dots with 52 px bold text and a white halo,
+# so they stay the loud bit whatever the map does -- which means the map may
+# carry real colour, and has to: the first version was forest #C9DABB on
+# #F6F4EE, two tones 30 luminance apart, and at the 390 px Telegram preview
+# width it was one pale green smear with no rivers and no roads in it.
+#
+# The rule now is *the map is a background, not a whisper*: forest sits near
+# luminance 165 (0.299R+0.587G+0.114B), open land stays near-white, and
+# every line on top of them -- water, roads, labels -- is saturated or cased
+# enough to survive being shrunk to a third of its size.
 
-C_BACKGROUND = (246, 244, 238)  # #F6F4EE warm off-white
-C_FOREST = (201, 218, 187)  # #C9DABB muted green
-C_WATER = (177, 208, 227)  # #B1D0E3 soft blue
-#: Roads have to read on the off-white background *and* on the forest
-#: green, which sit at almost the same luminance -- hence the darker greys.
-C_ROAD_MINOR = (199, 192, 181)  # #C7C0B5 secondary
-C_ROAD_MAJOR = (183, 174, 160)  # #B7AEA0 primary
-C_ROAD_TRUNK = (166, 156, 140)  # #A69C8C motorway, trunk
-C_LABEL = (74, 70, 64)  # #4A4640
-C_LABEL_HALO = (250, 249, 246)
-C_ATTRIBUTION = (138, 133, 125)
+C_BACKGROUND = (246, 244, 238)  # #F6F4EE warm off-white -- open land
+C_FOREST = (150, 180, 132)  # #96B484 luminance 166 (was #C9DABB, 209)
+C_RESIDENTIAL = (213, 195, 165)  # #D5C3A5 towns and villages, warm grey-tan
+C_INDUSTRIAL = (203, 195, 182)  # #CBC3B6 the same, a shade greyer
+
+#: Water is the region's skeleton -- the Bečva and the Vsetínská Bečva run
+#: the valleys every road and every village follows -- so it is the most
+#: saturated thing on the map.
+C_WATER = (146, 193, 220)  # #92C1DC lake and pond fill
+C_RIVER = (72, 138, 182)  # #488AB6
+C_WATER_EDGE = C_RIVER  # a lake's rim is the colour of the river feeding it
+C_STREAM = (133, 180, 212)  # #85B4D4 thinner and paler than a river
+
+#: Roads are drawn casing-then-fill: a dark thin outline under a lighter
+#: core.  That is what makes a 3 px road read over forest at 390 px wide --
+#: a flat grey line of the same width simply disappears into it.
+C_ROAD = {
+    "secondary": ((152, 144, 131), (250, 249, 244)),  # #989083 / #FAF9F4
+    "primary": ((176, 138, 86), (245, 213, 167)),  # #B08A56 / #F5D5A7
+    "trunk": ((150, 97, 49), (233, 168, 106)),  # #966131 / #E9A86A
+    "motorway": ((150, 97, 49), (233, 168, 106)),
+}
+C_LABEL = (55, 52, 47)  # #37342F
+C_LABEL_HALO = (252, 251, 248)
+C_ATTRIBUTION = (122, 117, 109)
 
 #: Line widths in 2x pixels (so "3" is 1.5 px on the finished map).
-W_STREAM = 2
-W_RIVER = 3
-W_ROAD = {"secondary": 2, "primary": 3, "trunk": 4, "motorway": 4}
+W_STREAM = 3
+W_RIVER = 6
+W_LAKE_EDGE = 4
+#: ``(casing, fill)`` per road class -- the casing shows as half the
+#: difference on each side, so a trunk is 8 px of orange in 13 px of brown
+#: (4 and 6.5 px once the 2x canvas is downsampled).
+W_ROAD = {
+    "secondary": (5, 3),
+    "primary": (9, 5),
+    "trunk": (13, 8),
+    "motorway": (13, 8),
+}
+#: Quiet classes first, so the trunks end up on top.
+ROAD_ORDER = ("secondary", "primary", "trunk", "motorway")
 
-LABEL_SIZE = 26  # 2x pixels -> 13 px on the finished map
-LABEL_HALO = 4
-LABEL_GAP = 9
-DOT_RADIUS = 5
+#: A brook shorter than this is lint at 40 m per pixel.  Measured over the
+#: whole watercourse of one name, not per way -- see :func:`long_streams`.
+STREAM_MIN_KM = 1.5
+#: Mean radius, for ground lengths -- *not* the sphere Mercator pretends
+#: the Earth is (:data:`~mushroom_alerts.mapping.basemap.EARTH_RADIUS_M`).
+EARTH_RADIUS_KM = 6371.0088
+
+#: Labels: towns big, villages small, both dark grey in a white halo.
+LABEL_SIZE = {"city": 30, "town": 30, "village": 23}  # 2x px
+DOT_RADIUS = {"city": 6, "town": 6, "village": 4}
+LABEL_HALO = 5
+LABEL_GAP = 10
+LABEL_PAD = (8, 6)  # collision padding around a placed name, 2x px
+#: Enough to orient by, few enough to still see the map under them.
+MAX_LABELS = 16
 ATTRIBUTION_SIZE = 20
 
 #: Labelled for orientation, always, even if they crowd something else.
 PRIORITY_PLACES = ("Valašské Meziříčí", "Vsetín", "Rožnov pod Radhoštěm")
+#: City before town before village; within a rank, the bigger population.
+PLACE_RANK = {"city": 0, "town": 1, "village": 2}
 
 
 def _bbox_clause() -> str:
@@ -116,11 +166,12 @@ BBOX = _bbox_clause()
 
 
 def build_queries(*, streams: bool) -> dict[str, str]:
-    """The four Overpass queries, verbatim into the sidecar and the README.
+    """The five Overpass queries, verbatim into the sidecar and the README.
 
     ``out geom;`` makes every way and every relation member carry its own
     coordinates, so one request per layer is all we need -- no node lookups,
-    no recursion.
+    no recursion.  The dict order is the fetch order, and the cache key is
+    the query text, so editing one of these refetches only that layer.
     """
     water = [
         f'  way["natural"="water"]({BBOX});',
@@ -128,6 +179,7 @@ def build_queries(*, streams: bool) -> dict[str, str]:
         f'  way["waterway"="river"]({BBOX});',
     ]
     if streams:
+        # Everything comes back; :func:`long_streams` throws away the ditches.
         water.append(f'  way["waterway"="stream"]({BBOX});')
     return {
         "forest": _query(
@@ -138,9 +190,15 @@ def build_queries(*, streams: bool) -> dict[str, str]:
   relation["natural"="wood"]({BBOX});
 );"""
         ),
+        "settlements": _query(
+            f"""(
+  way["landuse"~"^(residential|industrial)$"]({BBOX});
+  relation["landuse"~"^(residential|industrial)$"]({BBOX});
+);"""
+        ),
         "water": _query("(\n" + "\n".join(water) + "\n);"),
         "roads": _query(f"""way["highway"~"^(motorway|trunk|primary|secondary)$"]({BBOX});"""),
-        "places": _query(f"""node["place"~"^(city|town)$"]({BBOX});"""),
+        "places": _query(f"""node["place"~"^(city|town|village)$"]({BBOX});"""),
     }
 
 
@@ -337,6 +395,13 @@ def areas(payload: dict) -> tuple[list[Ring], list[Ring], dict[str, int]]:
     return outer, inner, counts
 
 
+#: The tags that make a closed way a filled polygon rather than a line.
+AREA_TAGS = {
+    "landuse": {"forest", "residential", "industrial"},
+    "natural": {"wood", "water"},
+}
+
+
 def _way_class(element: dict) -> set[str]:
     """What a way is for us: ``area``, ``river``, ``stream`` or a road class.
 
@@ -349,7 +414,7 @@ def _way_class(element: dict) -> set[str]:
     geometry = element.get("geometry") or []
     closed = len(geometry) >= 4 and geometry[0] == geometry[-1]
     classes: set[str] = set()
-    if closed and (tags.get("landuse") == "forest" or tags.get("natural") in {"wood", "water"}):
+    if closed and any(tags.get(key) in values for key, values in AREA_TAGS.items()):
         classes.add("area")
     waterway = tags.get("waterway")
     if not closed and waterway in {"river", "stream"}:
@@ -358,6 +423,59 @@ def _way_class(element: dict) -> set[str]:
     if highway in W_ROAD:
         classes.add(highway)
     return classes
+
+
+def subset(payload: dict, key: str, value: str) -> dict:
+    """The elements of one payload carrying one tag.
+
+    ``landuse=residential`` and ``landuse=industrial`` arrive in the same
+    Overpass answer and are drawn in two different colours, so the layer is
+    split here rather than fetched twice.
+    """
+    return {
+        "elements": [
+            element
+            for element in payload.get("elements", [])
+            if isinstance(element, dict) and (element.get("tags") or {}).get(key) == value
+        ]
+    }
+
+
+def _length_km(line: Ring) -> float:
+    """Ground length of a polyline, km.
+
+    Equirectangular, which is exact enough for a 50 km box: the error over
+    one OSM way is far below the 1.5 km threshold it feeds.
+    """
+    total = 0.0
+    for (lat1, lon1), (lat2, lon2) in zip(line, line[1:]):
+        dx = math.radians(lon2 - lon1) * math.cos(math.radians((lat1 + lat2) / 2))
+        dy = math.radians(lat2 - lat1)
+        total += math.hypot(dx, dy) * EARTH_RADIUS_KM
+    return total
+
+
+def long_streams(ways: list[dict]) -> list[Ring]:
+    """The streams worth drawing: everything under 1.5 km is thrown away.
+
+    Measured over the whole watercourse *of one name*, not per way: OSM
+    splits one brook into a dozen ways wherever a bridge or a landuse
+    boundary crosses it, and a per-way filter would draw the long ones full
+    of holes.  An unnamed way answers for itself.
+    """
+    total_by_name: dict[str, float] = {}
+    for element in ways:
+        name = str((element.get("tags") or {}).get("name") or "")
+        if name:
+            total_by_name[name] = total_by_name.get(name, 0.0) + _length_km(_geometry(element))
+    kept: list[Ring] = []
+    for element in ways:
+        geometry = _geometry(element)
+        name = str((element.get("tags") or {}).get("name") or "")
+        length = total_by_name[name] if name else _length_km(geometry)
+        if length >= STREAM_MIN_KM:
+            kept.append(geometry)
+    return kept
 
 
 # -- drawing -------------------------------------------------------------
@@ -395,6 +513,11 @@ def _paint(canvas: Image.Image, size: tuple[int, int], colour, painter) -> None:
     canvas.paste(colour, (0, 0), mask)
 
 
+def _closed(points: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    """A ring's points, with the first repeated at the end if it is not."""
+    return points if points and points[0] == points[-1] else points + points[:1]
+
+
 def draw_areas(
     canvas: Image.Image,
     size: tuple[int, int],
@@ -402,47 +525,77 @@ def draw_areas(
     payload: dict,
     colour: tuple[int, int, int],
     *,
-    lines: list[tuple[Ring, int]] | None = None,
+    edge: tuple[int, int, int] | None = None,
+    edge_width: int = 0,
 ) -> tuple[int, dict[str, int]]:
+    """Fill an area layer, optionally with a darker rim around every ring.
+
+    The rim is painted first and the fill covers it, so what is left is a
+    hairline *outside* the shape -- which is what makes a pond a few pixels
+    across still read as water rather than as a smudge.
+    """
     outer, inner, counts = areas(payload)
+
+    def paint_rim(draw: ImageDraw.ImageDraw) -> None:
+        for ring in outer:
+            draw.line(_closed(project.line(ring)), fill=255, width=edge_width, joint="curve")
+
+    if edge is not None and edge_width:
+        _paint(canvas, size, edge, paint_rim)
 
     def paint(draw: ImageDraw.ImageDraw) -> None:
         for ring in outer:
             draw.polygon(project.line(ring), fill=255)
         for ring in inner:  # holes, after every fill
             draw.polygon(project.line(ring), fill=0)
-        for way, width in lines or []:
-            draw.line(project.line(way), fill=255, width=width, joint="curve")
 
     _paint(canvas, size, colour, paint)
     counts["holes"] = len(inner)
     counts["rings"] = len(outer)
-    return len(outer) + len(inner) + len(lines or []), counts
+    return len(outer) + len(inner), counts
+
+
+def draw_lines(
+    canvas: Image.Image,
+    project: Projector,
+    ways: list[Ring],
+    colour: tuple[int, int, int],
+    width: int,
+) -> int:
+    """One flat run of polylines -- rivers, streams."""
+    draw = ImageDraw.Draw(canvas)
+    for way in ways:
+        draw.line(project.line(way), fill=colour, width=width, joint="curve")
+    return len(ways)
 
 
 def draw_roads(canvas: Image.Image, project: Projector, payload: dict) -> tuple[int, dict]:
-    """Thin grey lines, quiet classes first so the trunks stay on top."""
+    """Casing under fill, so a road reads over the forest as well as over
+    the open land.
+
+    Every casing goes down before the first fill rather than each road being
+    finished in turn: otherwise a trunk's dark casing would be stamped
+    across the pale core of every secondary it crosses.  Within each of the
+    two passes the quiet classes come first, so the trunks end up on top.
+    """
     draw = ImageDraw.Draw(canvas)
-    by_class: dict[str, list[Ring]] = {k: [] for k in W_ROAD}
+    by_class: dict[str, list[list[tuple[float, float]]]] = {k: [] for k in W_ROAD}
     for element in elements(payload):
         if element.get("type") != "way":
             continue
         for name in _way_class(element) & set(W_ROAD):
             geometry = _geometry(element)
             if len(geometry) >= 2:
-                by_class[name].append(geometry)
-    colours = {
-        "secondary": C_ROAD_MINOR,
-        "primary": C_ROAD_MAJOR,
-        "trunk": C_ROAD_TRUNK,
-        "motorway": C_ROAD_TRUNK,
-    }
-    drawn = 0
-    for name in ("secondary", "primary", "trunk", "motorway"):
-        for way in by_class[name]:
-            draw.line(project.line(way), fill=colours[name], width=W_ROAD[name], joint="curve")
-            drawn += 1
-    return drawn, {k: len(v) for k, v in sorted(by_class.items())}
+                by_class[name].append(project.line(geometry))
+    for layer in (0, 1):  # 0 casing, 1 fill
+        for name in ROAD_ORDER:
+            colour, width = C_ROAD[name][layer], W_ROAD[name][layer]
+            for way in by_class[name]:
+                draw.line(way, fill=colour, width=width, joint="curve")
+    return (
+        sum(len(ways) for ways in by_class.values()),
+        {k: len(v) for k, v in sorted(by_class.items())},
+    )
 
 
 @dataclass
@@ -455,7 +608,13 @@ class Place:
 
 
 def places(payload: dict, bbox: tuple[float, float, float, float]) -> list[Place]:
-    """Towns inside the drawn box, the three orientation ones first."""
+    """Settlements inside the drawn box, best label first.
+
+    The three orientation towns lead; after them it is city before town
+    before village and, within a rank, the bigger population -- so a cap on
+    the number of labels drops the hamlets and keeps the places a reader has
+    heard of.
+    """
     min_lon, min_lat, max_lon, max_lat = bbox
     found: list[Place] = []
     for element in elements(payload):
@@ -474,9 +633,9 @@ def places(payload: dict, bbox: tuple[float, float, float, float]) -> list[Place
 
     def order(place: Place) -> tuple:
         try:
-            return (0, PRIORITY_PLACES.index(place.name), "")
+            return (0, PRIORITY_PLACES.index(place.name), 0, place.name)
         except ValueError:
-            return (1, -place.population, place.name)
+            return (1, PLACE_RANK.get(place.kind, 9), -place.population, place.name)
 
     return sorted(found, key=order)
 
@@ -496,19 +655,29 @@ def draw_places(
 
     Orientation is the whole point of these labels, so a name that would
     collide with one already drawn -- or run off the edge -- is simply left
-    out rather than smeared over the map.
+    out rather than smeared over the map, and the list stops at
+    :data:`MAX_LABELS`: past that the names start hiding the valleys they
+    were meant to help find.
     """
     draw = ImageDraw.Draw(canvas)
-    font = ImageFont.truetype(str(FONT_PATH), LABEL_SIZE)
+    fonts = {
+        size_px: ImageFont.truetype(str(FONT_PATH), size_px)
+        for size_px in set(LABEL_SIZE.values())
+    }
     taken = list(reserved)
     margin = 6 * SUPERSAMPLE
     edge = 14 * SUPERSAMPLE  # a dot glued to the border reads as a mistake
+    pad_x, pad_y = LABEL_PAD
     labelled: list[str] = []
     for place in found:
+        if len(labelled) >= MAX_LABELS:
+            break
+        font = fonts[LABEL_SIZE.get(place.kind, LABEL_SIZE["village"])]
+        radius = DOT_RADIUS.get(place.kind, DOT_RADIUS["village"])
         x, y = project(place.lat, place.lon)
         if not (edge <= x <= size[0] - edge and edge <= y <= size[1] - edge):
             continue
-        dot = (x - DOT_RADIUS, y - DOT_RADIUS, x + DOT_RADIUS, y + DOT_RADIUS)
+        dot = (x - radius, y - radius, x + radius, y + radius)
         if any(_overlaps(dot, box) for box in taken):
             continue
         for anchor, point in (
@@ -518,7 +687,7 @@ def draw_places(
             ("md", (x, y - LABEL_GAP)),
         ):
             box = draw.textbbox(point, place.name, font=font, anchor=anchor)
-            box = (box[0] - 4, box[1] - 3, box[2] + 4, box[3] + 3)
+            box = (box[0] - pad_x, box[1] - pad_y, box[2] + pad_x, box[3] + pad_y)
             if box[0] < margin or box[1] < margin:
                 continue
             if box[2] > size[0] - margin or box[3] > size[1] - margin:
@@ -571,7 +740,7 @@ def build(args: argparse.Namespace) -> int:
     log(f"  lon {min_lon!r} .. {max_lon!r}")
     log(f"  lat {min_lat!r} .. {max_lat!r}")
 
-    queries = build_queries(streams=args.streams)
+    queries = build_queries(streams=not args.no_streams)
 
     log("fetching:")
     cache_dir = None if args.no_cache else Path(args.cache_dir).expanduser()
@@ -590,24 +759,43 @@ def build(args: argparse.Namespace) -> int:
     forest.drawn, forest.detail = draw_areas(canvas, size, project, payloads["forest"], C_FOREST)
     stats.append(forest)
 
-    waterways: list[tuple[Ring, int]] = []
+    # Towns over the forest, water over the towns: a river runs through one.
+    built = LayerStat(
+        "settlements", _hex(C_RESIDENTIAL), len(payloads["settlements"].get("elements", []))
+    )
+    for landuse, colour in (("residential", C_RESIDENTIAL), ("industrial", C_INDUSTRIAL)):
+        drawn, detail = draw_areas(
+            canvas, size, project, subset(payloads["settlements"], "landuse", landuse), colour
+        )
+        built.drawn += drawn
+        built.detail[landuse] = detail["rings"]
+    stats.append(built)
+
+    rivers: list[Ring] = []
+    stream_ways: list[dict] = []
     for element in elements(payloads["water"]):
         if element.get("type") != "way":
             continue
         classes = _way_class(element)
-        width = W_RIVER if "river" in classes else (W_STREAM if "stream" in classes else 0)
-        if width:
+        if "river" in classes:
             geometry = _geometry(element)
             if len(geometry) >= 2:
-                waterways.append((geometry, width))
-    water = LayerStat("water", _hex(C_WATER), len(payloads["water"].get("elements", [])))
+                rivers.append(geometry)
+        elif "stream" in classes:
+            stream_ways.append(element)
+    streams = long_streams(stream_ways)
+    water = LayerStat("water", _hex(C_RIVER), len(payloads["water"].get("elements", [])))
     water.drawn, water.detail = draw_areas(
-        canvas, size, project, payloads["water"], C_WATER, lines=waterways
+        canvas, size, project, payloads["water"], C_WATER, edge=C_WATER_EDGE, edge_width=W_LAKE_EDGE
     )
-    water.detail["waterways"] = len(waterways)
+    water.drawn += draw_lines(canvas, project, streams, C_STREAM, W_STREAM)
+    water.drawn += draw_lines(canvas, project, rivers, C_RIVER, W_RIVER)
+    water.detail["rivers"] = len(rivers)
+    water.detail["streams"] = len(streams)
+    water.detail["streams_dropped"] = len(stream_ways) - len(streams)
     stats.append(water)
 
-    roads = LayerStat("roads", _hex(C_ROAD_MAJOR), len(payloads["roads"].get("elements", [])))
+    roads = LayerStat("roads", _hex(C_ROAD["trunk"][1]), len(payloads["roads"].get("elements", [])))
     roads.drawn, roads.detail = draw_roads(canvas, project, payloads["roads"])
     stats.append(roads)
 
@@ -615,7 +803,7 @@ def build(args: argparse.Namespace) -> int:
     found = places(payloads["places"], bbox)
     labels = LayerStat("places", _hex(C_LABEL), len(payloads["places"].get("elements", [])))
     labels.drawn, labelled = draw_places(canvas, size, project, found, [credit_box])
-    labels.detail = {"inside_bbox": len(found)}
+    labels.detail = {"inside_bbox": len(found), "max_labels": MAX_LABELS}
     stats.append(labels)
     log("labelled: " + ", ".join(labelled))
 
@@ -685,15 +873,20 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-cache", action="store_true", help="do not read or write the cache")
     parser.add_argument("--refresh", action="store_true", help="refetch even when cached")
     parser.add_argument(
-        "--streams",
+        "--no-streams",
         action="store_true",
-        help="also draw waterway=stream (noisy at this scale; off by default)",
+        help=f"drop waterway=stream entirely (default: keep the ones at least "
+        f"{STREAM_MIN_KM} km long)",
     )
     parser.add_argument(
         "--colors",
         type=int,
-        default=128,
-        help="quantise the PNG to this many palette colours (0 = keep RGB)",
+        default=256,
+        help="quantise the PNG to this many palette colours (0 = keep RGB). "
+        "256, not the 128 the flat first map could afford: measured against "
+        "the RGB original, 128 washes the darkest label ink out by 109 levels "
+        "and moves 2.7%% of the map by more than 16; 256 keeps that tail at "
+        "0.7%% and costs 84 KB",
     )
     parser.add_argument("--quiet", action="store_true")
     return build(parser.parse_args(argv))
