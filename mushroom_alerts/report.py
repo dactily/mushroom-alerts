@@ -53,6 +53,7 @@ __all__ = [
     "DETAIL_LOCATIONS",
     "error_class_of",
     "summarize",
+    "date_label",
     "decide",
     "render",
     "to_json",
@@ -493,15 +494,25 @@ def decide(store: Store, summary: Mapping[str, Any]) -> tuple[bool, str]:
 # ----------------------------------------------------------------------
 # rendering: the block the agent re-wraps, and nothing else
 # ----------------------------------------------------------------------
-def _header(summary: Mapping[str, Any]) -> str:
+def date_label(summary: Mapping[str, Any]) -> str:
+    """The date the block speaks about: ``13.09``, or ``13–14.09``.
+
+    Public because the rendered map prints the same date next to the same
+    numbers, and "the same" has to mean one function, not two that agree
+    today.  See :mod:`mushroom_alerts.mapping.render`.
+    """
     if summary["mode"] == WEEKEND:
         saturday, sunday = summary["weekend"]
         if saturday.month == sunday.month:
-            span = f"{saturday.day:02d}–{_dm(sunday)}"
-        else:
-            span = f"{_dm(saturday)}–{_dm(sunday)}"
-        return f"🍄 Грибной прогноз на выходные {span}"
-    return f"🍄 Грибной прогноз: {_dm(summary['date'])}"
+            return f"{saturday.day:02d}–{_dm(sunday)}"
+        return f"{_dm(saturday)}–{_dm(sunday)}"
+    return _dm(summary["date"])
+
+
+def _header(summary: Mapping[str, Any]) -> str:
+    if summary["mode"] == WEEKEND:
+        return f"🍄 Грибной прогноз на выходные {date_label(summary)}"
+    return f"🍄 Грибной прогноз: {date_label(summary)}"
 
 
 def _chance_title(summary: Mapping[str, Any]) -> str:
