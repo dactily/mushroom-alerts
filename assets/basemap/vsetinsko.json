@@ -1,0 +1,116 @@
+{
+  "name": "vsetinsko",
+  "width": 1200,
+  "height": 1000,
+  "projection": "EPSG:3857",
+  "bbox": {
+    "min_lon": 17.749,
+    "min_lat": 49.16906695848169,
+    "max_lon": 18.449,
+    "max_lat": 49.54899925170674
+  },
+  "image": "vsetinsko.png",
+  "built_at": "2026-09-13T00:39:40Z",
+  "source": "OpenStreetMap via Overpass API (https://overpass-api.de/api/interpreter)",
+  "attribution": "© OpenStreetMap contributors",
+  "fetch_bbox": {
+    "min_lat": 49.16,
+    "min_lon": 17.74,
+    "max_lat": 49.56,
+    "max_lon": 18.46
+  },
+  "supersample": 2,
+  "palette_colors": 256,
+  "background": "#F6F4EE",
+  "labels": [
+    "Valašské Meziříčí",
+    "Vsetín",
+    "Rožnov pod Radhoštěm",
+    "Zubří",
+    "Vizovice",
+    "Slušovice",
+    "Karolinka",
+    "Nový Hrozenkov",
+    "Papradno",
+    "Horní Bečva",
+    "Halenkov",
+    "Mořkov",
+    "Hovězí",
+    "Ostravice",
+    "Valašská Bystřice",
+    "Velké Karlovice"
+  ],
+  "layers": [
+    {
+      "name": "forest",
+      "colour": "#96B484",
+      "elements": 4224,
+      "drawn": 8695,
+      "holes": 4454,
+      "relations": 369,
+      "rings": 4241,
+      "ways": 3854
+    },
+    {
+      "name": "settlements",
+      "colour": "#D5C3A5",
+      "elements": 3482,
+      "drawn": 3576,
+      "industrial": 393,
+      "residential": 3094
+    },
+    {
+      "name": "water",
+      "colour": "#488AB6",
+      "elements": 11894,
+      "drawn": 3008,
+      "holes": 12,
+      "relations": 11,
+      "rings": 994,
+      "rivers": 44,
+      "streams": 1958,
+      "streams_dropped": 8898,
+      "ways": 983
+    },
+    {
+      "name": "roads",
+      "colour": "#E9A86A",
+      "elements": 1658,
+      "drawn": 1658,
+      "motorway": 16,
+      "primary": 971,
+      "secondary": 609,
+      "trunk": 62
+    },
+    {
+      "name": "places",
+      "colour": "#37342F",
+      "elements": 168,
+      "drawn": 16,
+      "inside_bbox": 154,
+      "max_labels": 16
+    }
+  ],
+  "overpass_queries": [
+    {
+      "name": "forest",
+      "query": "[out:json][timeout:180];\n(\n  way[\"landuse\"=\"forest\"](49.16,17.74,49.56,18.46);\n  way[\"natural\"=\"wood\"](49.16,17.74,49.56,18.46);\n  relation[\"landuse\"=\"forest\"](49.16,17.74,49.56,18.46);\n  relation[\"natural\"=\"wood\"](49.16,17.74,49.56,18.46);\n);\nout geom;\n"
+    },
+    {
+      "name": "places",
+      "query": "[out:json][timeout:180];\nnode[\"place\"~\"^(city|town|village)$\"](49.16,17.74,49.56,18.46);\nout geom;\n"
+    },
+    {
+      "name": "roads",
+      "query": "[out:json][timeout:180];\nway[\"highway\"~\"^(motorway|trunk|primary|secondary)$\"](49.16,17.74,49.56,18.46);\nout geom;\n"
+    },
+    {
+      "name": "settlements",
+      "query": "[out:json][timeout:180];\n(\n  way[\"landuse\"~\"^(residential|industrial)$\"](49.16,17.74,49.56,18.46);\n  relation[\"landuse\"~\"^(residential|industrial)$\"](49.16,17.74,49.56,18.46);\n);\nout geom;\n"
+    },
+    {
+      "name": "water",
+      "query": "[out:json][timeout:180];\n(\n  way[\"natural\"=\"water\"](49.16,17.74,49.56,18.46);\n  relation[\"natural\"=\"water\"](49.16,17.74,49.56,18.46);\n  way[\"waterway\"=\"river\"](49.16,17.74,49.56,18.46);\n  way[\"waterway\"=\"stream\"](49.16,17.74,49.56,18.46);\n);\nout geom;\n"
+    }
+  ]
+}

@@ -22,7 +22,7 @@ dev = ["pytest>=8.0"]
 mushroom-alerts = "mushroom_alerts.__main__:main"
 
 [tool.setuptools]
-packages = ["mushroom_alerts"]
+packages = ["mushroom_alerts", "mushroom_alerts.mapping"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

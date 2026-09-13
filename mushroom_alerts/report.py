@@ -51,8 +51,10 @@ __all__ = [
     "WEEKEND",
     "NEAR_DAYS",
     "DETAIL_LOCATIONS",
+    "MEDIA_PREFIX",
     "error_class_of",
     "summarize",
+    "date_label",
     "decide",
     "render",
     "to_json",
@@ -76,6 +78,12 @@ CAVEAT_NAMES = 3
 #: ``ПРИЧИНА`` is a diagnostic line, never shown to the human; with twenty
 #: locations it must still not outgrow the block it explains.
 REASON_ITEMS = 4
+
+#: The line that hands Hermes the rendered map: ``MEDIA:/abs/path.png``,
+#: last in the block and on its own line, so the agent can copy it verbatim
+#: and the transport can turn it into a native photo.  No space after the
+#: colon: the whole rest of the line is the path.
+MEDIA_PREFIX = "MEDIA:"
 
 _PHASE_RANK = {
     "no_episode": 0,
@@ -493,15 +501,25 @@ def decide(store: Store, summary: Mapping[str, Any]) -> tuple[bool, str]:
 # ----------------------------------------------------------------------
 # rendering: the block the agent re-wraps, and nothing else
 # ----------------------------------------------------------------------
-def _header(summary: Mapping[str, Any]) -> str:
+def date_label(summary: Mapping[str, Any]) -> str:
+    """The date the block speaks about: ``13.09``, or ``13–14.09``.
+
+    Public because the rendered map prints the same date next to the same
+    numbers, and "the same" has to mean one function, not two that agree
+    today.  See :mod:`mushroom_alerts.mapping.render`.
+    """
     if summary["mode"] == WEEKEND:
         saturday, sunday = summary["weekend"]
         if saturday.month == sunday.month:
-            span = f"{saturday.day:02d}–{_dm(sunday)}"
-        else:
-            span = f"{_dm(saturday)}–{_dm(sunday)}"
-        return f"🍄 Грибной прогноз на выходные {span}"
-    return f"🍄 Грибной прогноз: {_dm(summary['date'])}"
+            return f"{saturday.day:02d}–{_dm(sunday)}"
+        return f"{_dm(saturday)}–{_dm(sunday)}"
+    return _dm(summary["date"])
+
+
+def _header(summary: Mapping[str, Any]) -> str:
+    if summary["mode"] == WEEKEND:
+        return f"🍄 Грибной прогноз на выходные {date_label(summary)}"
+    return f"🍄 Грибной прогноз: {date_label(summary)}"
 
 
 def _chance_title(summary: Mapping[str, Any]) -> str:
@@ -621,8 +639,28 @@ def _detail_lines(summary: Mapping[str, Any]) -> list[str]:
     return [_detail_line(item, summary, headline) for item in _leaders(summary)]
 
 
-def render(summary: Mapping[str, Any], *, send: bool, reason: str) -> str:
-    """The whole block.  Every number and date in it is final."""
+def _block(lines: Sequence[str], media_path: str | None) -> str:
+    """The block as text, with the map -- if there is one -- on the last line."""
+    out = list(lines)
+    if media_path:
+        out.append(f"{MEDIA_PREFIX}{media_path}")
+    return "\n".join(out) + "\n"
+
+
+def render(
+    summary: Mapping[str, Any],
+    *,
+    send: bool,
+    reason: str,
+    media_path: str | None = None,
+) -> str:
+    """The whole block.  Every number and date in it is final.
+
+    ``media_path`` is the map rendered for *this* block; it becomes the last
+    line, after ``ОГОВОРКИ``.  Without it the block is byte-for-byte what it
+    has always been -- a map is an addition to the message, never a change
+    to it.
+    """
     lines = [
         f"ОТПРАВЛЯТЬ: {'да' if send else 'нет'}",
         f"ПРИЧИНА: {reason}",
@@ -632,7 +670,7 @@ def render(summary: Mapping[str, Any], *, send: bool, reason: str) -> str:
         lines.append("ШАНС: данных нет, прогноз не собрался")
         lines.append("ФАЗА: данных нет")
         lines.append(f"ОГОВОРКИ: {summary['caveats']}")
-        return "\n".join(lines) + "\n"
+        return _block(lines, media_path)
 
     mode = str(summary["mode"])
     lines.append(f"{_chance_title(summary)}:")
@@ -648,11 +686,15 @@ def render(summary: Mapping[str, Any], *, send: bool, reason: str) -> str:
     elif summary["locations"]:
         lines.append("ПОДРОБНО: ни у одной локации нет числа")
     lines.append(f"ОГОВОРКИ: {summary['caveats']}")
-    return "\n".join(lines) + "\n"
+    return _block(lines, media_path)
 
 
 def to_json(
-    summary: Mapping[str, Any], *, send: bool, reason: str
+    summary: Mapping[str, Any],
+    *,
+    send: bool,
+    reason: str,
+    media_path: str | None = None,
 ) -> dict[str, Any]:
     """The same fields, machine-readable, for tests and for debugging."""
     broken = summary["error_class"] == "brief"
@@ -695,7 +737,7 @@ def to_json(
             }
             for item in summary["locations"]
         ],
-        "text": render(summary, send=send, reason=reason),
+        "text": render(summary, send=send, reason=reason, media_path=media_path),
     }
     return rules_lib._jsonable(payload)
 

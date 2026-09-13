@@ -22,6 +22,12 @@ when every source failed or rule calculation failed; partial results remain
 exit ``0``.  ``--location SLUG`` (repeatable) narrows either view to a few
 locations; being partial, such a run never records the report row.
 
+``--map-dir PATH`` adds the picture (``mushroom_alerts/mapping``) next to
+that block: it is drawn only when the decision is to send, written under a
+name of its own, announced as a last ``MEDIA:`` line, and pruned after 31
+days.  Without the flag every byte of the output is what it was before it
+existed, and with it a failed render still costs nothing but the picture.
+
 ``status`` never fetches: it renders the shared location view from SQLite.
 """
 
@@ -36,7 +42,8 @@ import sys
 import traceback
 from dataclasses import dataclass
 from datetime import date
-from typing import Any, Iterable, Sequence
+from pathlib import Path
+from typing import Any, Iterable, Mapping, Sequence
 
 from .base import (
     EXIT_ERROR,
@@ -306,6 +313,52 @@ def select_locations(
     return [loc for loc in locations if loc.slug in chosen], missing
 
 
+def attach_map(
+    summary: Mapping[str, Any],
+    locations: list[Location],
+    map_dir: str,
+    *,
+    send: bool,
+) -> str | None:
+    """Draw the map for a block that is going out.  Never raises.
+
+    The picture is an attachment and is treated like one.  It is rendered
+    *after* the decision has been taken and written to ``reports``, so a
+    drawing bug cannot make the script speak or stay silent; it is written
+    only when the block says to send, so a silent day leaves no file; and
+    every failure costs the attachment alone -- the block is still printed
+    in full, the exit code does not move, and yesterday's map is never sent
+    next to today's numbers.
+    """
+    if not send:
+        return None
+    if summary["error_class"] == "brief":
+        # The block prints no numbers at all in this state, so a map would
+        # be showing figures the message does not have.
+        print("map: the brief did not assemble, nothing to draw", file=sys.stderr)
+        return None
+    folder = Path(map_dir)
+    try:
+        from .mapping import render as render_lib
+
+        written = render_lib.render_map(
+            summary, locations=locations, directory=folder
+        )
+    except Exception as exc:  # noqa: BLE001 - no picture is worth the message
+        print(
+            f"map: not rendered ({exc.__class__.__name__}: {exc})", file=sys.stderr
+        )
+        return None
+    for warning in written.warnings:
+        print(f"map: {warning}", file=sys.stderr)
+    try:
+        for stale in render_lib.prune_maps(folder, today=summary["date"]):
+            print(f"map: pruned {stale.name}", file=sys.stderr)
+    except OSError as exc:  # noqa: BLE001 - housekeeping, not the message
+        print(f"map: pruning failed ({exc})", file=sys.stderr)
+    return str(written.path)
+
+
 def cmd_brief(args: argparse.Namespace) -> int:
     """The Hermes brief: same pipeline as ``check``, facts instead of a verdict.
 
@@ -381,19 +434,32 @@ def cmd_brief(args: argparse.Namespace) -> int:
                 send, reason = report_lib.decide(store, summary)
             else:
                 send, reason = report_lib.publish(store, summary)
+            # Both the decision and the stored state are final by now; the
+            # map can only add a line to the block, never change one.
+            map_dir = getattr(args, "map_dir", None)
+            media = (
+                attach_map(summary, locations, map_dir, send=send) if map_dir else None
+            )
             if args.json:
+                payload = report_lib.to_json(
+                    summary, send=send, reason=reason, media_path=media
+                )
+                if map_dir:  # without the flag the output must not change
+                    payload["map_path"] = media
                 print(
                     jsonlib.dumps(
-                        dict(
-                            report_lib.to_json(summary, send=send, reason=reason),
-                            exit_code=exit_code,
-                        ),
+                        dict(payload, exit_code=exit_code),
                         ensure_ascii=False,
                         indent=2,
                     )
                 )
             else:
-                print(report_lib.render(summary, send=send, reason=reason), end="")
+                print(
+                    report_lib.render(
+                        summary, send=send, reason=reason, media_path=media
+                    ),
+                    end="",
+                )
             return exit_code
 
     if args.json:
@@ -563,6 +629,13 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="SLUG",
         help="only this location (repeatable; slug or name). Debugging filter: "
         "with --mode the decision is printed but not recorded",
+    )
+    p_brief.add_argument(
+        "--map-dir",
+        metavar="PATH",
+        help="with --mode: render the forecast map into this directory when "
+        "the block says to send, add its path as a MEDIA: line, and delete "
+        "the maps this tool wrote there more than 31 days ago",
     )
     p_brief.set_defaults(func=cmd_brief)
 
