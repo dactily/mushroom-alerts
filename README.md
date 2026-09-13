@@ -8,7 +8,9 @@ CLI that Hermes Agent runs from cron.  `brief --mode daily|weekend` prints a
 short block that is already worded for a human and already says whether to
 send it at all; Hermes only re-words it for Telegram.  The block is a list of
 "location — chance, %" in the order of `locations.yaml`: the script never
-ranks or recommends, the human decides where to drive.  Plain `brief` prints
+ranks or recommends, the human decides where to drive.  With `--map-dir` the
+same numbers are also drawn on a map of the area and handed over as one
+`MEDIA:` line, which Hermes sends as a photo.  Plain `brief` prints
 every fact and both tables for debugging, and `check` keeps the deterministic
 exit-code contract for when no interpretation is wanted.  Nothing here calls an LLM.  See `PLAN.md` for
 the whole design, `hermes/PROMPT.md` for the text pasted into the Hermes
@@ -31,6 +33,7 @@ python3 -m venv .venv
 
 .venv/bin/python -m mushroom_alerts brief --mode daily    # ready block + send flag
 .venv/bin/python -m mushroom_alerts brief --mode weekend  # weekend plan, always sent
+.venv/bin/python -m mushroom_alerts brief --mode daily --map-dir ./maps  # + the picture
 .venv/bin/python -m mushroom_alerts brief                 # full debug view
 .venv/bin/python -m mushroom_alerts brief --json
 .venv/bin/python -m mushroom_alerts brief --days 7        # shorter forecast table
@@ -113,6 +116,44 @@ always `0` unless every source failed or rule calculation failed. Running
 `brief` archives observations and forecast releases but does not update
 antispam/emission state.
 
+## The map
+
+`brief --mode daily|weekend --map-dir PATH` draws the same block as a
+1200×1600 PNG and prints its absolute path as a last line, `MEDIA:<path>`,
+after `ОГОВОРКИ` (`--json` adds `map_path`). Hermes turns that line into a
+native Telegram photo and strips it from the visible text. Without the flag
+the output is byte-for-byte what it was before.
+
+The page is a header with the date, the basemap of the area (1200×1000)
+with one colour-coded dot per location and its percentage in 52 px next to
+it, the full list of locations in the order of `locations.yaml` in two
+columns underneath, and a footer with the colour scale, a distance scale
+derived from the basemap's own `km_per_pixel`, and
+`© OpenStreetMap contributors · openstreetmap.org/copyright`. The colour
+runs continuously from muted red at 0 % through amber at 50 % to green at
+100 %; no number is neutral grey and «—», never 0 %. A short name is drawn
+under a percentage only where it collides with nothing; crowded labels fall
+back to the percentage alone and then to a nudged position with a leader
+line, and `mapping/render.py:LABEL_OFFSETS` can pin one slug by hand.
+Nothing on the picture is calculated: it is rendered from the same summary
+object the text block is rendered from.
+
+Delivery is deliberately boring. The picture is drawn only when the
+decision is to send, into `mushroom-<mode>-<date>-<8 hex>.png` written
+atomically (temp file, then `os.replace`) — never a shared `latest.png`, so
+no message ever points at bytes that changed underneath it. Maps this tool
+wrote more than 31 days ago are deleted on a successful run, matched by
+that exact name pattern. Any failure to draw costs the picture alone: the
+block is printed in full, the exit code is unchanged, the report row was
+already stored, an older map is never attached, and the diagnostic goes to
+stderr. A location outside the basemap keeps its line in the block and its
+row in the list, is named on the picture («вне карты: …») and reported on
+stderr — it is never dropped quietly.
+
+The basemap itself is a committed artefact (`assets/basemap/`), built once
+by `tools/build_basemap.py`; rendering needs no network, no tiles and no
+browser.
+
 `calibration [--json]` compares archived Open-Meteo rainfall and projected
 API30 with later station observations. It reports sample size, bias
 (`forecast - observation`) and MAE per location for horizons 1-3, 4-7 and
@@ -140,8 +181,10 @@ automatically when a location moves.
 .venv/bin/python -m pytest
 ```
 
-Fully offline (430 tests): `tests/fixtures/` holds real responses recorded on
-2026-09-07 with `MUSHROOM_RECORD=1`.  To refresh them:
+Fully offline: `tests/fixtures/` holds real responses recorded on
+2026-09-07 with `MUSHROOM_RECORD=1`, and the map tests draw on a stub
+basemap (`tests/fake_basemap.py`) rather than the committed artefact.  To
+refresh the fixtures:
 
 ```sh
 MUSHROOM_RECORD=1 .venv/bin/python -m mushroom_alerts check
@@ -174,6 +217,10 @@ failures are soft by design.
   Schema v4 adds the additive `reports` table (one row per date and mode);
   schema v5 adds the additive `reports.chances_json` column, the per-location
   percentages the send rule compares.
+- The map is an attachment, not part of the decision: it is rendered after
+  the report row is stored, only when the block says to send, and a failure
+  to draw never changes the text, the exit code or the stored state. Every
+  number and date on it comes from the object the block was rendered from.
 - The application, not Hermes, calculates both the comparable chance in
   percent (PLAN §9b: a ramp over the days since the rain anchor, the best
   over all episodes, x a ramp over API30 x temperature gate x frost x both

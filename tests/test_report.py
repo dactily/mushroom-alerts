@@ -765,3 +765,56 @@ def test_a_long_list_of_reasons_is_trimmed(store):
     assert send is True
     assert reason.count(";") == 4
     assert reason.endswith("ещё изменений: 4")
+
+
+# ----------------------------------------------------------------------
+# the map line: an addition to the block, never a change to it
+# ----------------------------------------------------------------------
+def test_the_block_is_unchanged_when_there_is_no_map():
+    item = summary()
+    assert report_lib.render(item, send=True, reason="тест") == report_lib.render(
+        item, send=True, reason="тест", media_path=None
+    )
+    assert "MEDIA" not in report_lib.render(item, send=True, reason="тест")
+
+
+def test_the_media_line_is_last_and_verbatim():
+    item = summary()
+    path = "/home/ihor.travkin/mushroom-alerts/maps/mushroom-daily-2026-09-12-1a2b3c4d.png"
+    text = report_lib.render(item, send=True, reason="тест", media_path=path)
+    plain = report_lib.render(item, send=True, reason="тест")
+
+    assert text == plain.rstrip("\n") + f"\nMEDIA:{path}\n"
+    lines = text.rstrip("\n").splitlines()
+    assert lines[-1] == f"MEDIA:{path}"
+    assert lines[-2].startswith("ОГОВОРКИ:")
+
+
+def test_a_broken_brief_block_puts_the_map_last_too():
+    item = summary(payload=brief(), all_failed=True)
+    text = report_lib.render(item, send=True, reason="тест", media_path="/maps/x.png")
+    lines = text.rstrip("\n").splitlines()
+    assert lines[-2].startswith("ОГОВОРКИ:")
+    assert lines[-1] == "MEDIA:/maps/x.png"
+
+
+def test_the_json_text_carries_the_media_line():
+    item = summary()
+    payload = report_lib.to_json(item, send=True, reason="тест", media_path="/maps/x.png")
+    assert payload["text"].rstrip("\n").endswith("MEDIA:/maps/x.png")
+    assert "map_path" not in payload  # the CLI adds it, and only with --map-dir
+
+
+@pytest.mark.parametrize(
+    "mode, today, expected",
+    [
+        ("daily", TODAY, "12.09"),
+        ("weekend", TODAY, "12–13.09"),
+        ("weekend", date(2026, 10, 31), "31.10–01.11"),
+    ],
+)
+def test_the_date_label_is_the_one_the_header_prints(mode, today, expected):
+    """The map prints the same date as the block, from the same function."""
+    item = summary(mode=mode, today=today, payload=brief(location(today=today)))
+    assert report_lib.date_label(item) == expected
+    assert report_lib._header(item).endswith(expected)

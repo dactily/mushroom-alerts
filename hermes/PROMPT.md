@@ -5,8 +5,10 @@
 - The wrapper script runs before the agent. Its stdout is the complete input
   for the message; the agent must not run the application a second time.
 - `mushroom_brief.sh` (daily 08:30 Europe/Prague) runs
-  `brief --mode daily`; `mushroom_weekend.sh` (Friday 19:00) runs
-  `brief --mode weekend`.
+  `brief --mode daily --map-dir $REPO/maps`; `mushroom_weekend.sh`
+  (Friday 19:00) runs `brief --mode weekend --map-dir $REPO/maps`. Both
+  create the directory first; failing to create it costs the picture and
+  nothing else.
 - The application computes everything: the per-location chance in percent,
   the cycle phase, the two technical lines, the caveats, and the send/silent
   decision. The block starts with `ОТПРАВЛЯТЬ: да|нет`. `нет` means the
@@ -52,6 +54,45 @@ row for today is replaced.
 Deterministic fallback without any agent reasoning is unchanged:
 `python -m mushroom_alerts check`, exit `10` → forward stdout, `0` → silence,
 `1` → error.
+
+## The map (`MEDIA:`)
+
+With `--map-dir` the application also draws the block as a 1200×1600 PNG —
+a map of the area with one coloured dot per location, the same percentages
+on it, the full list in the order of `locations.yaml` underneath, and the
+colour and distance scales with `© OpenStreetMap contributors` in the
+footer. The numbers and the date on the picture are the ones the block
+prints: it is rendered from the same object, not calculated a second time.
+
+The block then carries one more line, last, after `ОГОВОРКИ`:
+
+```
+MEDIA:/home/ihor.travkin/mushroom-alerts/maps/mushroom-daily-2026-09-13-1a2b3c4d.png
+```
+
+The prompts pass that line through verbatim, on its own line; Hermes turns
+it into a native Telegram photo and strips it from the visible text. The
+agent must not rename it, quote it, wrap it, translate it or describe it.
+
+Rules the application keeps, so the prompt does not have to:
+
+- the picture is drawn **only** when the decision is to send. On
+  `ОТПРАВЛЯТЬ: нет` no file is written and no `MEDIA:` line appears;
+- the file name carries the mode, the date and a random id, so two runs
+  never overwrite each other and no message ever points at bytes that
+  changed underneath it. There is no `latest.png`. Writing is atomic
+  (temporary file in the same directory, then `os.replace`);
+- maps this tool wrote more than 31 days ago are deleted on a successful
+  run, matched by that exact name pattern; nothing else in the directory is
+  touched;
+- a failure to draw costs the picture alone: the block is printed in full,
+  the exit code does not change, the stored report row is written before
+  the drawing is attempted, and an older map is never attached instead. The
+  diagnostic goes to stderr, which the wrapper merges into stdout — lines
+  starting with `map:` are for the log, never for the message;
+- a location the basemap does not cover keeps its line in the block and its
+  row in the list on the picture, is named on the map («вне карты: …») and
+  reported on stderr. It is never dropped silently.
 
 ## Chance in percent v4
 
@@ -107,7 +148,11 @@ cp hermes/mushroom_brief.sh hermes/mushroom_weekend.sh \
    ~/.hermes/profiles/family/scripts/
 chmod 700 ~/.hermes/profiles/family/scripts/mushroom_brief.sh \
           ~/.hermes/profiles/family/scripts/mushroom_weekend.sh
+mkdir -p /home/ihor.travkin/mushroom-alerts/maps
 ```
+
+The maps directory is the only new state on disk: a few hundred kilobytes
+per day, pruned after 31 days, and safe to delete at any time.
 
 Prompt updates are applied to the existing jobs by the server deployment
 procedure using `hermes/daily_prompt.txt` and `hermes/friday_prompt.txt`

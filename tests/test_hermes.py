@@ -69,6 +69,36 @@ def test_two_wrappers_run_the_two_modes():
         assert 'export MUSHROOM_DB="$REPO/state.sqlite"' in text
 
 
+def test_both_wrappers_ask_for_the_map_and_make_its_directory():
+    for name in ("mushroom_brief.sh", "mushroom_weekend.sh"):
+        text = (HERMES / name).read_text(encoding="utf-8")
+        assert "REPO=/home/ihor.travkin/mushroom-alerts" in text
+        assert 'MAPS="$REPO/maps"' in text
+        assert 'mkdir -p "$MAPS"' in text
+        assert '--map-dir "$MAPS"' in text
+        # a missing maps directory must never stop the block from printing
+        assert 'mkdir -p "$MAPS" || exit' not in text
+
+
+def test_both_prompts_carry_the_media_line_through_untouched():
+    for name in PROMPTS:
+        text = _prompt(name)
+        assert "MEDIA:" in text
+        assert "дословно и без изменений" in text
+        assert "отдельной строкой" in text
+        # and it stays a formatting instruction: no path, no photo API
+        assert "/home/" not in text and "sendPhoto" not in text
+
+
+def test_the_contract_documents_the_map_as_an_attachment():
+    docs = (HERMES / "PROMPT.md").read_text(encoding="utf-8")
+    assert "--map-dir" in docs
+    assert "MEDIA:" in docs
+    assert "latest.png" in docs  # named as the thing we deliberately do not do
+    assert "31" in docs
+    assert "© OpenStreetMap contributors" in docs
+
+
 def test_hermes_contract_documents_the_script_side_decision():
     docs = (HERMES / "PROMPT.md").read_text(encoding="utf-8")
     assert "delivery_outcome" in docs
