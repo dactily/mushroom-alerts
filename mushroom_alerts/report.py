@@ -267,7 +267,8 @@ def _location_summary(
             "primary_start": growth[0],
             "residual_end": episode.get("residual_window_end"),
         },
-        "api30_mm": api30,  # what the chance was computed from
+        "api30_mm": api30,  # today's own value on the derived curve
+        "api30_week_mm": chance.get("moisture_mm"),  # what the chance read
         "api30_station_mm": api30_station,  # what the station measured
         "chmi_level": chmi.get("level"),
         "houbymapa_level": houby.get("level"),
@@ -563,20 +564,29 @@ def _leaders(summary: Mapping[str, Any]) -> list[Mapping[str, Any]]:
 
 
 def _api30_fact(item: Mapping[str, Any]) -> str:
-    """``API30 36 мм (расчёт), станция 24 мм`` -- both, never one as both.
+    """``API30 36 мм (расчёт, неделя 31), станция 24 мм`` -- all three.
 
     The chance uses the derived curve while it is usable, so that number
     comes first and says so; the measurement follows, because it is the one
     the cap is about.  Once the derived value is unusable the chance falls
     back to the station for today, and ``item["api30_mm"]`` arrives as
     ``None``, so the line prints the measurement alone.  One line either way.
+
+    The week mean rides along in the brackets because the moisture
+    contribution is read from it, not from the day: without it the line
+    that exists to explain the percentage no longer reproduces it -- and it
+    also says at a glance whether the ground is wetting or drying.
     """
     used, measured = item["api30_mm"], item["api30_station_mm"]
+    week = item.get("api30_week_mm")
+    note = "расчёт" if used is not None else "станция"
+    if week is not None:
+        note += f", неделя {_mm(week)}"
     if used is None:
-        return "API30 —" if measured is None else f"API30 {_mm(measured)} (станция)"
+        return "API30 —" if measured is None else f"API30 {_mm(measured)} ({note})"
     if measured is None:
-        return f"API30 {_mm(used)} (расчёт), станции нет"
-    return f"API30 {_mm(used)} (расчёт), станция {_mm(measured)}"
+        return f"API30 {_mm(used)} ({note}), станции нет"
+    return f"API30 {_mm(used)} ({note}), станция {_mm(measured)}"
 
 
 def _facts(item: Mapping[str, Any]) -> str:

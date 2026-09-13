@@ -29,11 +29,14 @@ ISO_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
 HORIZON = 16
 
 
-def chance_block(today, value, *, curve=None, capped=False):
+def chance_block(today, value, *, curve=None, capped=False, moisture_mm=None):
     """``views`` hands the report this shape; ``curve`` overrides by offset.
 
     ``value=None`` is a location with no usable API30: the whole curve is
     ``None`` and there is no peak, exactly as ``ChanceOutlook`` renders it.
+    ``moisture_mm`` is the week the moisture contribution was read from; the
+    default ``None`` is the older shape, which the detail line still has to
+    render without it.
     """
     days = {
         today + timedelta(days=n): (curve or {}).get(n, value)
@@ -46,6 +49,7 @@ def chance_block(today, value, *, curve=None, capped=False):
         "curve": days,
         "peak": peak,
         "capped": capped,
+        "moisture_mm": moisture_mm,
     }
 
 
@@ -458,6 +462,20 @@ def test_the_detail_line_prints_the_api30_the_chance_was_computed_from():
     assert "API30 36 мм (расчёт), станции нет" in text
 
 
+def test_the_detail_line_prints_the_week_the_moisture_term_was_read_from():
+    """The moisture contribution is a week mean, so the week has to show.
+
+    Without it the line that exists to explain the percentage no longer
+    reproduces it -- and the pair also says whether the ground is wetting
+    (36 today against 31 for the week) or drying.
+    """
+    payload = brief(location())
+    payload["locations"][0]["biological"]["chance"]["moisture_mm"] = 31.4
+    text = report_lib.render(summary(payload=payload), send=True, reason="тест")
+
+    assert "API30 36 мм (расчёт, неделя 31 мм), станция 24 мм" in text
+
+
 def test_a_stale_release_makes_the_line_print_the_station_number():
     """``views`` falls back to the station for today, so the line does too.
 
@@ -683,7 +701,7 @@ def test_json_carries_the_same_fields(store):
     )
     assert payload["phase_text"].startswith("дождь прошёл 11.09")
     assert payload["error_class"] == "none"
-    assert payload["rules_version"] == "6"
+    assert payload["rules_version"] == "7"
     assert payload["locations"][0]["chance"] == 40
     assert payload["locations"][0]["chance_peak"] == ["2026-09-18", 70]
     assert payload["locations"][0]["verdict"] == "medium"
@@ -700,7 +718,7 @@ def test_the_stored_state_is_what_the_next_run_compares(store):
     assert '"valmez": 40' in row["chances_json"]
     assert '"valmez": "medium"' in row["verdicts_json"]
     assert "2026-09-18" in row["candidates_json"]
-    assert row["rules_version"] == "6"
+    assert row["rules_version"] == "7"
     assert store.last_report("daily", before=TODAY) is None
 
 
