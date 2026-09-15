@@ -512,6 +512,7 @@ def location_snapshot(
     # and still wants a real rain episode.
     soaks = biology.detect_soak_episodes(slug, chance_api30, today)
     biological["soak_episodes"] = [soak.as_dict() for soak in soaks]
+    biological["phase_context"] = biology.phase_context(episodes, soaks, today)
     biological["chance"] = chance_lib.assess_chance_horizon(
         today,
         # The chance ramps over the days since a rain instead of reading the

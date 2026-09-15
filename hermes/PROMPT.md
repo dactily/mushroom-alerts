@@ -135,9 +135,15 @@ requires:
 - fresh high support from at least one of ČHMÚ map or HoubyMapa.
 
 The maps remain model evidence, not proof that mushrooms are present. The
-wording for every phase is produced by `report.py`, so the agent never has to
+wording for every phase comes from the shared `biological.phase_context`, so the agent never has to
 describe a window or decide how confident to sound. The verdict itself is
 unchanged by the percentage; it stays in the debugging brief.
+
+Phase context lists both rain pulses and sustained-moisture episodes used by
+the percentage, including overlapping old and upcoming windows. Reports group
+each explanation by location; no location's dominant phase represents the
+whole region. Hermes preserves these explanations verbatim. The legacy
+`guidance.phase` remains the categorical verdict's rain-only phase.
 
 ## Deployment note
 

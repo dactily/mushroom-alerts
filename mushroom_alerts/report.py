@@ -261,6 +261,7 @@ def _location_summary(
         "chance_peak": peak,
         "chance_capped": bool(chance.get("capped")),
         "phase": guidance.get("phase", "no_episode"),
+        "phase_context": bio.get("phase_context"),
         "event_id": guidance.get("dominant_event_id"),
         "episode": {
             "anchor": episode.get("date"),
@@ -282,6 +283,9 @@ def _location_summary(
 
 def _phase_sentence(item: Mapping[str, Any]) -> str:
     """One plain sentence about the rain cycle of one location."""
+    context = item.get("phase_context") or {}
+    if context.get("text"):
+        return str(context["text"])
     phase = item["phase"]
     episode = item.get("episode") or {}
     if phase == "waiting":
@@ -302,10 +306,17 @@ def _phase_sentence(item: Mapping[str, Any]) -> str:
 
 
 def _headline_phase(summaries: Sequence[Mapping[str, Any]]) -> str:
-    """The strongest phase across locations -- one line for the whole block."""
+    """Keep every distinct location context; never generalize one site's phase."""
     if not summaries:
         return "данных нет"
-    return _phase_sentence(max(summaries, key=lambda item: _PHASE_RANK.get(item["phase"], 0)))
+    groups: dict[str, list[str]] = {}
+    for item in summaries:
+        sentences = (item.get("phase_context") or {}).get("sentences") or [_phase_sentence(item)]
+        for sentence in sentences:
+            groups.setdefault(sentence, []).append(str(item["short_name"]))
+    if len(groups) == 1:
+        return next(iter(groups))
+    return " | ".join(f"{', '.join(names)}: {text}" for text, names in groups.items())
 
 
 def _who(names: Sequence[str]) -> str:
@@ -639,7 +650,7 @@ def _detail_line(
         head = f"{item['short_name']} {_pct(item['chance'])}"
     line = f"{head}: {_facts(item)}{_peak_tail(item, summary)}"
     own_phase = _phase_sentence(item)
-    if own_phase != headline_phase:
+    if own_phase not in headline_phase and not item.get("phase_context"):
         line += f"; фаза: {own_phase}"
     return line
 
@@ -739,6 +750,8 @@ def to_json(
                 "verdict": item["verdict"],
                 "verdict_label": item["verdict_label"],
                 "phase": item["phase"],
+                "phase_context": item.get("phase_context"),
+                "phase_text": _phase_sentence(item),
                 "facts": _facts(item),
                 "weekend": item["weekend"],
                 "detailed": item["slug"] in leaders,

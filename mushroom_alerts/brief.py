@@ -514,7 +514,8 @@ def _biological_lines(view: Mapping[str, Any]) -> list[str]:
     )
     out.append(f"  шанс сегодня: {_chance_text(bio.get('chance'))}")
     out.append(f"  смысл: {guidance.get('scope_text', 'оценка условий участка')}")
-    out.append(f"  фаза: {guidance.get('phase_text', 'недостаточно данных')}")
+    context = bio.get("phase_context") or {}
+    out.append(f"  фаза: {context.get('text') or guidance.get('phase_text', 'недостаточно данных')}")
     out.append(
         f"  дождевых эпизодов учтено: {len(episodes)}; "
         f"активных {len(guidance.get('active_event_ids') or [])}, "

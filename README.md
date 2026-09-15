@@ -1,5 +1,12 @@
 # mushroom-alerts
 
+Phase explanations use `biological.phase_context` in the shared JSON view,
+debug brief and daily/weekend reports. They retain overlapping rain and
+sustained-moisture windows and name the locations for each explanation.
+`guidance.phase` remains the conservative rain-only verdict, whereas percentages
+also use sustained moisture. Neither a residual window nor a high condition
+score confirms observed mushrooms. Rendering changes do not alter score weights.
+
 Daily mushroom-growth signal for a handful of places around Valašské
 Meziříčí, assembled from the ČHMÚ growth-probability raster, HoubyMapa, ČHMÚ
 station open data and Open-Meteo -- plus an API30 rain index projected 16

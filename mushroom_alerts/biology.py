@@ -412,6 +412,60 @@ def detect_soak_episodes(
     )
 
 
+def phase_context(
+    episodes: Sequence[RainEpisode], soaks: Sequence[SoakEpisode], day: date
+) -> dict[str, Any]:
+    """Explain all current/upcoming inputs to the chance, with their dates.
+
+    The categorical verdict's dominant pulse is retained separately. It
+    cannot explain a score that also uses sustained moisture or newer rain.
+    """
+    entries: list[dict[str, Any]] = []
+    for episode in episodes:
+        entries.append({
+            "event_id": episode.event_id, "kind": "rain",
+            "start": episode.start, "end": episode.end,
+            "anchor": episode.anchor, "primary_start": episode.primary_start,
+            "primary_end": episode.primary_end, "residual_end": episode.residual_end,
+        })
+    for soak in soaks:
+        entries.append({
+            "event_id": soak.event_id, "kind": "soak",
+            "start": soak.start, "end": soak.end, "anchor": soak.anchor,
+            "primary_start": soak.anchor + timedelta(days=policy.GROWTH_WINDOW_FROM_DAYS),
+            "primary_end": soak.end + timedelta(days=policy.GROWTH_WINDOW_TO_DAYS),
+            "residual_end": soak.end + timedelta(days=policy.GROWTH_RESIDUAL_TO_DAYS),
+        })
+    parts = []
+    for entry in entries:
+        phase = (
+            "waiting" if day < entry["primary_start"] else
+            "primary_window" if day <= entry["primary_end"] else
+            "residual_window" if day <= entry["residual_end"] else "expired"
+        )
+        entry["phase"] = phase
+        if phase == "expired":
+            continue
+        dm = lambda value: value.strftime("%d.%m")
+        span = dm(entry["start"])
+        if entry["end"] != entry["start"]:
+            span += "–" + dm(entry["end"])
+        origin = ("дождь " if entry["kind"] == "rain" else "длительное увлажнение ") + span
+        if phase == "waiting":
+            message = f"новое расчётное окно {dm(entry['primary_start'])}–{dm(entry['primary_end'])}"
+        elif phase == "primary_window":
+            message = f"расчётное окно {dm(entry['primary_start'])}–{dm(entry['primary_end'])} идёт"
+        else:
+            message = f"остаточное расчётное окно до {dm(entry['residual_end'])}"
+        parts.append(f"{origin}: {message}")
+    return {
+        "date": day, "events": entries, "sentences": parts,
+        "text": "; ".join(parts) if parts else (
+            "активных расчётных окон нет; оценка опирается на влажность и карты"
+        ),
+    }
+
+
 def _phase(episode: RainEpisode, day: date) -> str:
     if day < episode.primary_start:
         return "waiting"

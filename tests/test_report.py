@@ -415,10 +415,10 @@ def test_a_detail_line_carries_its_own_phase_when_it_differs():
         ),
     )
     text = report_lib.render(summary(payload=payload), send=True, reason="тест")
-    assert "ФАЗА: расчётное окно роста идёт, стоит проверить лес" in text
+    assert "ФАЗА: Valmez: расчётное окно роста идёт, стоит проверить лес" in text
     assert (
-        "; фаза: дождь прошёл 11.09, условия для роста ожидаются с 18.09"
-        in text.split("ПОДРОБНО")[1]
+        "Rajnochovice: дождь прошёл 11.09, условия для роста ожидаются с 18.09"
+        in text.split("ПОДРОБНО")[0]
     )
     # the headline location does not repeat the headline phase
     assert text.count("расчётное окно роста идёт") == 1
@@ -836,3 +836,18 @@ def test_the_date_label_is_the_one_the_header_prints(mode, today, expected):
     item = summary(mode=mode, today=today, payload=brief(location(today=today)))
     assert report_lib.date_label(item) == expected
     assert report_lib._header(item).endswith(expected)
+
+
+def test_report_groups_each_episode_without_losing_location_or_soak():
+    old = "дождь 28.08: остаточное расчётное окно до 18.09"
+    new = "дождь 11.09: новое расчётное окно 18.09–23.09"
+    soak = "длительное увлажнение 29.08–05.09: расчётное окно 11.09–17.09 идёт"
+    first = location()
+    second = location(slug="maruska", name="Maruška", short="Maruška")
+    first["biological"]["phase_context"] = {"text": new, "sentences": [new]}
+    second["biological"]["phase_context"] = {"text": "; ".join([old, new, soak]), "sentences": [old, new, soak]}
+    result = summary(payload=brief(first, second))
+    assert f"Valmez, Maruška: {new}" in result["phase_text"]
+    assert f"Maruška: {old}" in result["phase_text"]
+    assert f"Maruška: {soak}" in result["phase_text"]
+    assert result["locations"][1]["phase_context"]["sentences"] == [old, new, soak]
