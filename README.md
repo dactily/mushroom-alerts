@@ -1,5 +1,12 @@
 # mushroom-alerts
 
+With a map attached, daily/weekend posts use a short companion text:
+up to two significant daily changes against the previous report date,
+upcoming and active windows, and data problems when present. Weekend text
+compares Saturday with Sunday. Per-location percentages stay on the map.
+Without a map (including rendering failures), the full text remains available.
+Detailed JSON and the debug brief retain the facts and episode explanations.
+
 Phase explanations use `biological.phase_context` in the shared JSON view,
 debug brief and daily/weekend reports. They retain overlapping rain and
 sustained-moisture windows and name the locations for each explanation.

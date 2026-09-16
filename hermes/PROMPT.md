@@ -1,5 +1,11 @@
 # Hermes: production contract
 
+With a complete map, `КРАТКО` replaces the location list, technical details
+and full phase history. Copy this text verbatim along with the header and
+MEDIA line. It contains at most two daily changes, upcoming/active windows,
+and any data caveats; weekend posts compare the two days. If the image fails
+or omits locations, the full text remains. Debug JSON retains all fields.
+
 ## Runtime
 
 - The wrapper script runs before the agent. Its stdout is the complete input

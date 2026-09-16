@@ -37,7 +37,7 @@ is news; having none on both sides is not.
 from __future__ import annotations
 
 from datetime import date, timedelta
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping, MutableMapping, Sequence
 
 import json
 
@@ -668,6 +668,55 @@ def _block(lines: Sequence[str], media_path: str | None) -> str:
     return "\n".join(out) + "\n"
 
 
+def _zones_genitive(count: int) -> str:
+    return f"{count} " + ("зоны" if count % 10 == 1 and count % 100 != 11 else "зон")
+
+
+def compact_lines(summary: Mapping[str, Any]) -> list[str]:
+    """Short map companion. All numbers remain in the map and debug JSON."""
+    lines: list[str] = []
+    if summary["mode"] == WEEKEND:
+        pairs = [item["weekend"] for item in summary["locations"]
+                 if all(day["chance"] is not None for day in item["weekend"])]
+        saturday = sum(pair[0]["chance"] > pair[1]["chance"] for pair in pairs)
+        sunday = sum(pair[1]["chance"] > pair[0]["chance"] for pair in pairs)
+        if pairs:
+            lines.append(
+                f"Оценки выше в субботу для {_zones_genitive(saturday)}, в воскресенье для {_zones_genitive(sunday)}."
+                if saturday or sunday else "Оценки на субботу и воскресенье одинаковые."
+            )
+    else:
+        changes = summary.get("changes") or []
+        if changes:
+            lines.append("Изменения: " + "; ".join(changes[:2]) + (
+                f"; ещё изменений: {len(changes) - 2}." if len(changes) > 2 else "."
+            ))
+
+    starts: dict[date, int] = {}
+    active = 0
+    for item in summary["locations"]:
+        events = (item.get("phase_context") or {}).get("events") or []
+        rain = [event for event in events if event["kind"] == "rain"]
+        if rain:
+            latest = max(rain, key=lambda event: _as_date(event["end"]))
+            if latest["phase"] == "waiting":
+                start = _as_date(latest["primary_start"])
+                if start is not None:
+                    starts[start] = starts.get(start, 0) + 1
+        active += any(event["phase"] == "primary_window" for event in events)
+    if starts:
+        dates = sorted(starts)
+        span = _dm(dates[0]) if len(dates) == 1 else f"{_dm(dates[0])}–{_dm(dates[-1])}"
+        lines.append(f"Новые расчётные окна для {_zones_genitive(sum(starts.values()))} начинаются {span}.")
+    if active:
+        lines.append(f"Сегодня расчётное окно активно для {_zones_genitive(active)}, с учётом предыдущего увлажнения.")
+    if not starts and not active:
+        lines.append("Новых или активных основных окон сейчас нет; оценки учитывают влажность и карты.")
+    if summary["caveats"] != "нет":
+        lines.append(str(summary["caveats"]))
+    return lines
+
+
 def render(
     summary: Mapping[str, Any],
     *,
@@ -675,13 +724,7 @@ def render(
     reason: str,
     media_path: str | None = None,
 ) -> str:
-    """The whole block.  Every number and date in it is final.
-
-    ``media_path`` is the map rendered for *this* block; it becomes the last
-    line, after ``ОГОВОРКИ``.  Without it the block is byte-for-byte what it
-    has always been -- a map is an addition to the message, never a change
-    to it.
-    """
+    """Render compact map companion or full text when no image is available."""
     lines = [
         f"ОТПРАВЛЯТЬ: {'да' if send else 'нет'}",
         f"ПРИЧИНА: {reason}",
@@ -691,6 +734,11 @@ def render(
         lines.append("ШАНС: данных нет, прогноз не собрался")
         lines.append("ФАЗА: данных нет")
         lines.append(f"ОГОВОРКИ: {summary['caveats']}")
+        return _block(lines, media_path)
+
+    if media_path and not summary.get("map_incomplete"):
+        lines.append("КРАТКО:")
+        lines.extend(compact_lines(summary))
         return _block(lines, media_path)
 
     mode = str(summary["mode"])
@@ -734,6 +782,7 @@ def to_json(
             else [_chance_line(item, mode) for item in summary["locations"]]
         ),
         "detail": [] if broken else _detail_lines(summary),
+        "compact": [] if broken else compact_lines(summary),
         "phase_text": "данных нет" if broken else summary["phase_text"],
         "error_class": summary["error_class"],
         "rules_version": summary["rules_version"],
@@ -765,9 +814,17 @@ def to_json(
     return rules_lib._jsonable(payload)
 
 
-def publish(store: Store, summary: Mapping[str, Any]) -> tuple[bool, str]:
+def publish(store: Store, summary: MutableMapping[str, Any]) -> tuple[bool, str]:
     """Decide, persist the decision, and hand the answer back."""
     send, reason = decide(store, summary)
+    previous = store.last_report(str(summary["mode"]), before=summary["date"])
+    old = json.loads(previous["chances_json"] or "{}") if previous else {}
+    summary["changes"] = [
+        f"{item['short_name']}: {int(old[item['slug']])} → {item['chance']} %"
+        for item in summary["locations"]
+        if old.get(item["slug"]) is not None and item["chance"] is not None
+        and abs(item["chance"] - int(old[item["slug"]])) >= policy.CHANCE_MOVE_PCT
+    ]
     state = state_of(summary)
     store.save_report(
         summary["date"],

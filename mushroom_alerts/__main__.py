@@ -43,7 +43,7 @@ import traceback
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Iterable, Mapping, MutableMapping, Sequence
 
 from .base import (
     EXIT_ERROR,
@@ -314,7 +314,7 @@ def select_locations(
 
 
 def attach_map(
-    summary: Mapping[str, Any],
+    summary: MutableMapping[str, Any],
     locations: list[Location],
     map_dir: str,
     *,
@@ -351,6 +351,8 @@ def attach_map(
         return None
     for warning in written.warnings:
         print(f"map: {warning}", file=sys.stderr)
+    if written.warnings:
+        summary["map_incomplete"] = True
     try:
         for stale in render_lib.prune_maps(folder, today=summary["date"]):
             print(f"map: pruned {stale.name}", file=sys.stderr)

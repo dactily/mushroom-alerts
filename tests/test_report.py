@@ -802,10 +802,13 @@ def test_the_media_line_is_last_and_verbatim():
     text = report_lib.render(item, send=True, reason="тест", media_path=path)
     plain = report_lib.render(item, send=True, reason="тест")
 
-    assert text == plain.rstrip("\n") + f"\nMEDIA:{path}\n"
+    assert "КРАТКО:" in text
+    assert "ШАНС на" not in text
+    assert "ПОДРОБНО" not in text
+    assert "ШАНС на" in plain
     lines = text.rstrip("\n").splitlines()
     assert lines[-1] == f"MEDIA:{path}"
-    assert lines[-2].startswith("ОГОВОРКИ:")
+    assert lines[-2]
 
 
 def test_a_broken_brief_block_puts_the_map_last_too():
@@ -821,6 +824,42 @@ def test_the_json_text_carries_the_media_line():
     payload = report_lib.to_json(item, send=True, reason="тест", media_path="/maps/x.png")
     assert payload["text"].rstrip("\n").endswith("MEDIA:/maps/x.png")
     assert "map_path" not in payload  # the CLI adds it, and only with --map-dir
+
+
+def test_compact_map_post_keeps_changes_windows_and_data_problems():
+    item = summary()
+    item["changes"] = ["Valmez: 45 → 60 %", "Bystřice: 35 → 50 %", "Maruška: 40 → 55 %"]
+    item["locations"][0]["phase_context"] = {"events": [
+        {"kind": "rain", "end": date(2026, 9, 11), "phase": "waiting", "primary_start": date(2026, 9, 18)},
+        {"kind": "soak", "phase": "primary_window"},
+    ]}
+    item["caveats"] = "Bystřice: данные устарели"
+    text = report_lib.render(item, send=True, reason="internal reason", media_path="/maps/x.png")
+    body = text.split("КРАТКО:\n")[1].split("MEDIA:")[0]
+    assert "Valmez: 45 → 60 %" in body and "ещё изменений: 1" in body
+    assert "18.09" in body and "предыдущего увлажнения" in body
+    assert item["caveats"] in body
+    assert "API30" not in body and "ПОДРОБНО" not in body
+    assert len(body) < 500
+
+
+def test_compact_weekend_compares_only_complete_pairs():
+    item = summary(mode="weekend")
+    item["locations"][0]["weekend"][0]["chance"] = 70
+    item["locations"][0]["weekend"][1]["chance"] = 50
+    assert "в субботу для 1 зоны" in report_lib.compact_lines(item)[0]
+    item["locations"][0]["weekend"][1]["chance"] = None
+    assert not any("в субботу" in line for line in report_lib.compact_lines(item))
+
+
+def test_compact_changes_compare_previous_date_and_survive_retry(store):
+    first = summary(payload=brief(location(chance=40)))
+    report_lib.publish(store, first)
+    later = summary(today=TODAY + timedelta(days=1), payload=brief(location(chance=55)))
+    report_lib.publish(store, later)
+    assert later["changes"] == ["Valmez: 40 → 55 %"]
+    report_lib.publish(store, later)
+    assert later["changes"] == ["Valmez: 40 → 55 %"]
 
 
 @pytest.mark.parametrize(
