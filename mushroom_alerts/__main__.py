@@ -1,4 +1,4 @@
-"""CLI: ``python -m mushroom_alerts check|brief|status|add|list|del``.
+"""CLI: ``python -m mushroom_alerts check|brief|status|export-health|add|list|del``.
 
 Exit-code contract for Hermes (PLAN §2)::
 
@@ -594,6 +594,22 @@ def cmd_calibration(args: argparse.Namespace) -> int:
     return EXIT_SILENT
 
 
+def cmd_export_health(args: argparse.Namespace) -> int:
+    """Print the sanitized read-only application and Hermes health contract."""
+    from . import health as health_lib
+
+    try:
+        locations = load_locations()
+        locations_ok = True
+    except Exception:  # noqa: BLE001 - preserve the stable JSON contract
+        locations = []
+        locations_ok = False
+        print("health export: locations unavailable", file=sys.stderr)
+    payload, readable = health_lib.build(locations)
+    print(jsonlib.dumps(payload, ensure_ascii=False, indent=2))
+    return EXIT_SILENT if readable and locations_ok else EXIT_ERROR
+
+
 # ----------------------------------------------------------------------
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -645,6 +661,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--weekly", action="store_true", help="deprecated compatibility no-op"
     )
     p_status.set_defaults(func=cmd_status)
+
+    p_health = sub.add_parser(
+        "export-health",
+        help="print sanitized read-only application and Hermes job health",
+    )
+    p_health.add_argument(
+        "--json",
+        action="store_true",
+        help="machine-readable schema v1 (the command always emits JSON)",
+    )
+    p_health.set_defaults(func=cmd_export_health)
 
     p_calibration = sub.add_parser(
         "calibration", help="show forecast bias and MAE by horizon"
