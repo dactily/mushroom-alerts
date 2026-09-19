@@ -55,6 +55,7 @@ python3 -m venv .venv
 
 .venv/bin/python -m mushroom_alerts status           # last stored snapshot
 .venv/bin/python -m mushroom_alerts status --json
+.venv/bin/python -m mushroom_alerts export-health --json  # sanitized health v1
 
 .venv/bin/python -m mushroom_alerts calibration         # bias/MAE, read-only
 .venv/bin/python -m mushroom_alerts calibration --json
@@ -90,7 +91,7 @@ failed. One dead source or one failed location is a partial result: useful
 data is retained, the failure is explicit, and the command exits `0` unless
 a positive `check` signal uses `10`.
 
-`brief`, `status`, `list`, `add` and `del` exit `0` on success and `1` on a
+`brief`, `status`, `export-health`, `list`, `add` and `del` exit `0` on success and `1` on a
 usage error.  With no trigger firing, `check` still prints the snapshot (handy by
 hand, ignored by Hermes) and exits `0`. Re-running `check` with identical
 source data is storage-idempotent: readings are upserted, the forecast release
@@ -98,6 +99,25 @@ reuses its content-derived `run_id`, and emission rows are not duplicated. The
 fetch requests still happen, and a same-day retry deliberately prints the same
 text and exit code so Hermes can retry transport. An emission row means the
 signal was printed, not that Telegram confirmed it.
+
+## Sanitized health export
+
+`export-health --json` is a read-only schema-v1 snapshot for the host health
+collector. It opens SQLite with `mode=ro`, never fetches weather or evaluates
+rules, and reads only the two allowlisted Hermes jobs. Scheduler prompts,
+delivery targets, error text and all unrelated jobs are excluded. The job file
+defaults to `~/.hermes/profiles/family/cron/jobs.json`; tests or another
+deployment may override it with `MUSHROOM_HERMES_JOBS`. SQLite defaults to
+`state.sqlite` in the checkout, with `MUSHROOM_DB` taking precedence.
+
+`favorableLocationsCount` counts configured locations whose percentage in the
+latest stored report is at least the shared `CHANCE_ALERT_PCT` threshold (60 %).
+`lastEvaluationAt` is that report's creation time, and
+`weatherDataAgeSeconds` is the age of the newest successfully stored weather
+reading. Missing data is represented by `null` timestamps and age `0`. The
+command still prints the complete stable JSON shape but exits `1` if the SQLite
+schema cannot be read or either allowlisted scheduler record is absent; job
+execution states are normalized to `ok`, `failed`, `missed`, or `unknown`.
 
 ## The Hermes brief
 
