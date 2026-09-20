@@ -1,5 +1,11 @@
 # Hermes: production contract
 
+With a complete map, `КРАТКО` replaces the location list, technical details
+and full phase history. Copy this text verbatim along with the header and
+MEDIA line. It contains at most two daily changes, upcoming/active windows,
+and any data caveats; weekend posts compare the two days. If the image fails
+or omits locations, the full text remains. Debug JSON retains all fields.
+
 ## Runtime
 
 - The wrapper script runs before the agent. Its stdout is the complete input
@@ -135,9 +141,15 @@ requires:
 - fresh high support from at least one of ČHMÚ map or HoubyMapa.
 
 The maps remain model evidence, not proof that mushrooms are present. The
-wording for every phase is produced by `report.py`, so the agent never has to
+wording for every phase comes from the shared `biological.phase_context`, so the agent never has to
 describe a window or decide how confident to sound. The verdict itself is
 unchanged by the percentage; it stays in the debugging brief.
+
+Phase context lists both rain pulses and sustained-moisture episodes used by
+the percentage, including overlapping old and upcoming windows. Reports group
+each explanation by location; no location's dominant phase represents the
+whole region. Hermes preserves these explanations verbatim. The legacy
+`guidance.phase` remains the categorical verdict's rain-only phase.
 
 ## Deployment note
 

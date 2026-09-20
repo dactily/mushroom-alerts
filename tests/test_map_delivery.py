@@ -104,7 +104,8 @@ def test_the_map_is_written_and_announced_on_the_last_line(monkeypatch, capsys, 
     assert path.name.startswith(f"mushroom-daily-{TODAY.isoformat()}-")
     # the line is last, and it is the last thing after ОГОВОРКИ
     body = out.rstrip("\n").splitlines()
-    assert body[-2].startswith("ОГОВОРКИ:")
+    assert "КРАТКО:" in out
+    assert "ПОДРОБНО" not in out
     assert out.count("MEDIA:") == 1
 
 
@@ -127,7 +128,8 @@ def test_without_the_flag_the_block_is_byte_identical(monkeypatch, capsys, maps)
     withmap = capsys.readouterr().out
     line = media_line(withmap)
     assert line is not None
-    assert withmap == plain.rstrip("\n") + "\n" + line + "\n"
+    assert "КРАТКО:" in withmap and "КРАТКО:" not in plain
+    assert "ШАНС на" in plain and "ШАНС на" not in withmap
 
 
 def test_two_runs_leave_two_files(monkeypatch, capsys, maps):

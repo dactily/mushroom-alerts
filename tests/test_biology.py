@@ -11,6 +11,29 @@ from mushroom_alerts.base import DataQuality, SeriesPoint
 TODAY = date(2026, 9, 12)
 
 
+def test_phase_context_preserves_old_and_new_rain_and_soak():
+    day = date(2026, 9, 15)
+    rain = {date(2026, 8, 28): 22.0, date(2026, 9, 11): 25.0}
+    points = _series(date(2026, 8, 1), day, rain)
+    episodes = biology.detect_rain_episodes("test", points, dict.fromkeys(points, 15.0), day)
+    soak = biology.SoakEpisode("soak", "test", date(2026, 8, 29), date(2026, 9, 5), 8, 32)
+    result = biology.phase_context(episodes, [soak], day)
+    assert [event["phase"] for event in result["events"]] == [
+        "residual_window", "waiting", "primary_window"
+    ]
+    assert "дождь 28.08: остаточное расчётное окно до 18.09" in result["text"]
+    assert "дождь 11.09: новое расчётное окно 18.09–23.09" in result["text"]
+    assert "длительное увлажнение 29.08–05.09" in result["text"]
+    assert "вероятность держится" not in result["text"]
+
+
+def test_phase_context_does_not_call_an_expired_window_current():
+    episodes = _episodes((-30, 25.0))
+    result = biology.phase_context(episodes, [], TODAY)
+    assert result["events"][0]["phase"] == "expired"
+    assert result["text"].startswith("активных расчётных окон нет")
+
+
 def _series(
     start: date,
     end: date,

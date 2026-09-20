@@ -415,10 +415,10 @@ def test_a_detail_line_carries_its_own_phase_when_it_differs():
         ),
     )
     text = report_lib.render(summary(payload=payload), send=True, reason="тест")
-    assert "ФАЗА: расчётное окно роста идёт, стоит проверить лес" in text
+    assert "ФАЗА: Valmez: расчётное окно роста идёт, стоит проверить лес" in text
     assert (
-        "; фаза: дождь прошёл 11.09, условия для роста ожидаются с 18.09"
-        in text.split("ПОДРОБНО")[1]
+        "Rajnochovice: дождь прошёл 11.09, условия для роста ожидаются с 18.09"
+        in text.split("ПОДРОБНО")[0]
     )
     # the headline location does not repeat the headline phase
     assert text.count("расчётное окно роста идёт") == 1
@@ -802,10 +802,13 @@ def test_the_media_line_is_last_and_verbatim():
     text = report_lib.render(item, send=True, reason="тест", media_path=path)
     plain = report_lib.render(item, send=True, reason="тест")
 
-    assert text == plain.rstrip("\n") + f"\nMEDIA:{path}\n"
+    assert "КРАТКО:" in text
+    assert "ШАНС на" not in text
+    assert "ПОДРОБНО" not in text
+    assert "ШАНС на" in plain
     lines = text.rstrip("\n").splitlines()
     assert lines[-1] == f"MEDIA:{path}"
-    assert lines[-2].startswith("ОГОВОРКИ:")
+    assert lines[-2]
 
 
 def test_a_broken_brief_block_puts_the_map_last_too():
@@ -823,6 +826,42 @@ def test_the_json_text_carries_the_media_line():
     assert "map_path" not in payload  # the CLI adds it, and only with --map-dir
 
 
+def test_compact_map_post_keeps_changes_windows_and_data_problems():
+    item = summary()
+    item["changes"] = ["Valmez: 45 → 60 %", "Bystřice: 35 → 50 %", "Maruška: 40 → 55 %"]
+    item["locations"][0]["phase_context"] = {"events": [
+        {"kind": "rain", "end": date(2026, 9, 11), "phase": "waiting", "primary_start": date(2026, 9, 18)},
+        {"kind": "soak", "phase": "primary_window"},
+    ]}
+    item["caveats"] = "Bystřice: данные устарели"
+    text = report_lib.render(item, send=True, reason="internal reason", media_path="/maps/x.png")
+    body = text.split("КРАТКО:\n")[1].split("MEDIA:")[0]
+    assert "Valmez: 45 → 60 %" in body and "ещё изменений: 1" in body
+    assert "18.09" in body and "предыдущего увлажнения" in body
+    assert item["caveats"] in body
+    assert "API30" not in body and "ПОДРОБНО" not in body
+    assert len(body) < 500
+
+
+def test_compact_weekend_compares_only_complete_pairs():
+    item = summary(mode="weekend")
+    item["locations"][0]["weekend"][0]["chance"] = 70
+    item["locations"][0]["weekend"][1]["chance"] = 50
+    assert "в субботу для 1 зоны" in report_lib.compact_lines(item)[0]
+    item["locations"][0]["weekend"][1]["chance"] = None
+    assert not any("в субботу" in line for line in report_lib.compact_lines(item))
+
+
+def test_compact_changes_compare_previous_date_and_survive_retry(store):
+    first = summary(payload=brief(location(chance=40)))
+    report_lib.publish(store, first)
+    later = summary(today=TODAY + timedelta(days=1), payload=brief(location(chance=55)))
+    report_lib.publish(store, later)
+    assert later["changes"] == ["Valmez: 40 → 55 %"]
+    report_lib.publish(store, later)
+    assert later["changes"] == ["Valmez: 40 → 55 %"]
+
+
 @pytest.mark.parametrize(
     "mode, today, expected",
     [
@@ -836,3 +875,18 @@ def test_the_date_label_is_the_one_the_header_prints(mode, today, expected):
     item = summary(mode=mode, today=today, payload=brief(location(today=today)))
     assert report_lib.date_label(item) == expected
     assert report_lib._header(item).endswith(expected)
+
+
+def test_report_groups_each_episode_without_losing_location_or_soak():
+    old = "дождь 28.08: остаточное расчётное окно до 18.09"
+    new = "дождь 11.09: новое расчётное окно 18.09–23.09"
+    soak = "длительное увлажнение 29.08–05.09: расчётное окно 11.09–17.09 идёт"
+    first = location()
+    second = location(slug="maruska", name="Maruška", short="Maruška")
+    first["biological"]["phase_context"] = {"text": new, "sentences": [new]}
+    second["biological"]["phase_context"] = {"text": "; ".join([old, new, soak]), "sentences": [old, new, soak]}
+    result = summary(payload=brief(first, second))
+    assert f"Valmez, Maruška: {new}" in result["phase_text"]
+    assert f"Maruška: {old}" in result["phase_text"]
+    assert f"Maruška: {soak}" in result["phase_text"]
+    assert result["locations"][1]["phase_context"]["sentences"] == [old, new, soak]
