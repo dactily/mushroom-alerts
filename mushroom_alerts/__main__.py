@@ -34,6 +34,7 @@ existed, and with it a failed render still costs nothing but the picture.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib
 import json as jsonlib
 import os
@@ -228,12 +229,21 @@ def run_pipeline(
         return None
     for result in results:
         store.upsert_readings(result.readings, retrieved_at=result.fetched_at)
+    archive_errors: list[str] = []
+    for result in results:
+        try:
+            store.upsert_artifacts(result.artifacts, retrieved_at=result.fetched_at)
+        except Exception as exc:  # noqa: BLE001 - readings remain useful
+            archive_errors.append(
+                f"{SOURCE_LABELS.get(result.source, result.source)} archive: "
+                f"{exc.__class__.__name__}: {exc}"
+            )
     cache_params(store, results)
     return Pipeline(
         results=results,
         notes=[
             f"{SOURCE_LABELS.get(r.source, r.source)}: {r.error}" for r in results if r.error
-        ],
+        ] + archive_errors,
         all_failed=all(not r.ok for r in results),
     )
 
@@ -318,6 +328,7 @@ def attach_map(
     locations: list[Location],
     map_dir: str,
     *,
+    store: Store,
     send: bool,
 ) -> str | None:
     """Draw the map for a block that is going out.  Never raises.
@@ -338,20 +349,37 @@ def attach_map(
         print("map: the brief did not assemble, nothing to draw", file=sys.stderr)
         return None
     folder = Path(map_dir)
+    heatmap_panel = None
+    heatmap_warnings: tuple[str, ...] = ()
+    try:
+        from .mapping.heatmap import build_heatmap_panel
+
+        heatmap = build_heatmap_panel(store)
+        if heatmap is not None:
+            heatmap_panel = heatmap.image
+            heatmap_warnings = heatmap.warnings
+    except Exception as exc:  # noqa: BLE001 - fall back to the legacy map
+        print(
+            f"map: heatmap not rendered ({exc.__class__.__name__}: {exc})",
+            file=sys.stderr,
+        )
     try:
         from .mapping import render as render_lib
 
         written = render_lib.render_map(
-            summary, locations=locations, directory=folder
+            summary,
+            locations=locations,
+            directory=folder,
+            heatmap_panel=heatmap_panel,
         )
     except Exception as exc:  # noqa: BLE001 - no picture is worth the message
         print(
             f"map: not rendered ({exc.__class__.__name__}: {exc})", file=sys.stderr
         )
         return None
-    for warning in written.warnings:
+    for warning in (*written.warnings, *heatmap_warnings):
         print(f"map: {warning}", file=sys.stderr)
-    if written.warnings:
+    if written.warnings or heatmap_warnings:
         summary["map_incomplete"] = True
     try:
         for stale in render_lib.prune_maps(folder, today=summary["date"]):
@@ -440,7 +468,8 @@ def cmd_brief(args: argparse.Namespace) -> int:
             # map can only add a line to the block, never change one.
             map_dir = getattr(args, "map_dir", None)
             media = (
-                attach_map(summary, locations, map_dir, send=send) if map_dir else None
+                attach_map(summary, locations, map_dir, store=store, send=send)
+                if map_dir else None
             )
             if args.json:
                 payload = report_lib.to_json(
@@ -528,10 +557,68 @@ def cmd_status(args: argparse.Namespace) -> int:
             }
             item["view"] = rules_lib._jsonable(rules_lib.snapshot(store, loc, today))
             payload.append(item)
+        archive = store.artifact_archive_status(
+            "chmi_map", "growth_raster", window_days=21
+        )
     if args.json:
-        print(jsonlib.dumps({"locations": payload}, ensure_ascii=False, indent=2))
+        print(
+            jsonlib.dumps(
+                {"locations": payload, "chmi_raster_archive": archive},
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
     else:
-        print("\n".join(lines) if lines else "no locations configured")
+        if archive["latest_date"]:
+            lines.append(
+                "ČHMÚ raster archive: "
+                f"latest {archive['latest_date']}, "
+                f"{archive['available_days']}/{archive['window_days']} days, "
+                f"{archive['stored_total']} total"
+            )
+        else:
+            lines.append("ČHMÚ raster archive: empty")
+        print("\n".join(lines))
+    return EXIT_SILENT
+
+
+def cmd_collect_chmi(args: argparse.Namespace) -> int:
+    """Fetch or import one ČHMÚ raster, archive it, and run no rules."""
+    from . import fetch_chmi_map
+
+    today = date.today()
+    locations = load_locations()
+    try:
+        if args.input:
+            payload = jsonlib.loads(Path(args.input).read_text(encoding="utf-8"))
+            if not isinstance(payload, dict):
+                raise ValueError("input must contain one JSON object")
+            result = fetch_chmi_map.fetch_payload(
+                locations, payload=payload, today=today
+            )
+        else:
+            with Http() as http:
+                result = fetch_chmi_map.fetch(locations, http=http, today=today)
+    except (OSError, ValueError, jsonlib.JSONDecodeError) as exc:
+        print(f"ČHMÚ collection failed: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+    if not result.artifacts:
+        print(f"ČHMÚ collection failed: {result.error or 'no raster'}", file=sys.stderr)
+        return EXIT_ERROR
+    with Store() as store:
+        for loc in locations:
+            store.sync_location(loc)
+        store.upsert_readings(result.readings, retrieved_at=result.fetched_at)
+        store.upsert_artifacts(result.artifacts, retrieved_at=result.fetched_at)
+        cache_params(store, [result])
+    artifact = result.artifacts[0]
+    digest = hashlib.sha256(artifact.data).hexdigest()
+    print(
+        f"archived ČHMÚ raster {artifact.date.isoformat()} "
+        f"({len(artifact.data)} bytes, sha256 {digest})"
+    )
+    if result.error:
+        print(f"ČHMÚ: {result.error}", file=sys.stderr)
     return EXIT_SILENT
 
 
@@ -663,6 +750,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--weekly", action="store_true", help="deprecated compatibility no-op"
     )
     p_status.set_defaults(func=cmd_status)
+
+    p_collect = sub.add_parser(
+        "collect-chmi", help="archive the current full-country ČHMÚ raster only"
+    )
+    p_collect.add_argument(
+        "--input", metavar="PATH", help="import a saved ČHMÚ JSON response"
+    )
+    p_collect.set_defaults(func=cmd_collect_chmi)
 
     p_health = sub.add_parser(
         "export-health",

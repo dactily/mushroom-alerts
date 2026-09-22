@@ -11,6 +11,7 @@ import pytest
 
 from mushroom_alerts import __main__ as cli
 from mushroom_alerts.base import Decision, FetchResult, Reading
+from mushroom_alerts.store import Store
 
 SHIPPED = Path(__file__).resolve().parent.parent / "locations.yaml"
 TODAY = date(2026, 9, 7)
@@ -254,6 +255,21 @@ def test_status_json(monkeypatch, capsys):
     payload = json.loads(capsys.readouterr().out)
     assert payload["locations"][0]["location"]["slug"] == "valmez"
     assert payload["locations"][0]["readings"][0]["value"] == 4
+
+
+def test_collect_chmi_imports_raster_without_running_rules(
+    tmp_path, chmi_payload, capsys
+):
+    source = tmp_path / "chmi.json"
+    source.write_text(json.dumps(chmi_payload), encoding="utf-8")
+
+    assert cli.main(["collect-chmi", "--input", str(source)]) == 0
+    captured = capsys.readouterr()
+    assert "archived ČHMÚ raster 2026-09-06" in captured.out
+    with Store() as store:
+        found = store.artifacts("chmi_map", "growth_raster")
+        assert len(found) == 1
+        assert found[0].date == date(2026, 9, 6)
 
 
 def test_add_list_del(capsys, isolated):

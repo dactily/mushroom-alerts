@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import hashlib
 from datetime import date
 
 import pytest
@@ -145,6 +146,15 @@ def test_fetch_live_fixture(http, locations):
     assert r.meta["px"] == [2308, 967]
     assert r.meta["label"] == "средняя"
     assert "stale" not in r.meta
+    assert len(result.artifacts) == 1
+    artifact = result.artifacts[0]
+    assert artifact.kind == "growth_raster"
+    assert artifact.date == date(2026, 9, 6)
+    assert artifact.content_type == "image/png"
+    assert artifact.data == m.decode_image_data(http.get_json(m.URL))
+    assert artifact.meta["projection"] == "EPSG:3857"
+    assert artifact.meta["size"] == [2755, 1600]
+    assert hashlib.sha256(artifact.data).hexdigest()
 
 
 def test_fetch_marks_stale_when_the_map_stops_updating(http, locations):
@@ -167,6 +177,14 @@ def test_fetch_survives_garbage(locations):
 
     result = m.fetch(locations, http=Broken(), today=TODAY)
     assert result.ok is False and result.readings == []
+
+
+def test_payload_with_no_location_data_still_archives(chmi_payload):
+    result = m.fetch_payload([], payload=chmi_payload, today=TODAY)
+    assert result.ok is True
+    assert result.readings == []
+    assert len(result.artifacts) == 1
+    assert result.error == "no locations resolved"
 
 
 def test_decode_image_size(chmi_payload):
