@@ -6,7 +6,7 @@ from datetime import date, datetime, timezone
 
 import pytest
 
-from mushroom_alerts.base import Location, Reading
+from mushroom_alerts.base import Location, Reading, SourceArtifact
 from mushroom_alerts.store import SCHEMA_VERSION, Store, db_path
 
 
@@ -50,6 +50,47 @@ def test_upsert_overwrites_the_value(store):
     got = store.get_reading("chmi_map", "valmez", "level", date(2026, 9, 6))
     assert got is not None and got.value == 4.0
     assert got.meta == {"px": [1, 2]}
+
+
+def test_source_artifacts_are_idempotent_and_correctable(store):
+    first = SourceArtifact(
+        "chmi_map", "growth_raster", date(2026, 9, 6), "image/png", b"first",
+        {"projection": "EPSG:3857"},
+    )
+    corrected = SourceArtifact(
+        "chmi_map", "growth_raster", date(2026, 9, 6), "image/png", b"corrected",
+        {"projection": "EPSG:3857", "corrected": True},
+    )
+    store.upsert_artifacts([first])
+    store.upsert_artifacts([first])
+    store.upsert_artifacts([corrected])
+
+    found = store.artifacts("chmi_map", "growth_raster")
+    assert len(found) == 1
+    assert found[0].data == b"corrected"
+    assert found[0].meta["corrected"] is True
+
+
+def test_artifact_archive_status_uses_latest_rolling_window(store):
+    artifacts = [
+        SourceArtifact(
+            "chmi_map", "growth_raster", date(2026, 9, day), "image/png", b"same"
+        )
+        for day in (1, 2, 22)
+    ]
+    store.upsert_artifacts(artifacts)
+    status = store.artifact_archive_status(
+        "chmi_map", "growth_raster", window_days=21
+    )
+    assert status == {
+        "latest_date": "2026-09-22",
+        "window_start": "2026-09-02",
+        "available_days": 2,
+        "window_days": 21,
+        "stored_total": 3,
+    }
+    # Identical bytes on different dates are legitimate daily observations.
+    assert len(store.artifacts("chmi_map", "growth_raster")) == 3
 
 
 def test_metrics_and_days_are_separate_rows(store):

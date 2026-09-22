@@ -637,6 +637,27 @@ def test_the_map_is_written_atomically_and_completely(tmp_path, basemap):
         assert image.format == "PNG"
 
 
+def test_heatmap_panel_is_inserted_between_map_and_location_list(tmp_path, basemap):
+    from PIL import Image
+
+    panel = Image.new(
+        "RGB", (render_lib.WIDTH, render_lib.HEAT_PANEL_HEIGHT), (1, 2, 3)
+    )
+    written = render_lib.render_map(
+        demo_summary("daily"),
+        locations=SHIPPED,
+        directory=tmp_path,
+        basemap=basemap,
+        heatmap_panel=panel,
+    )
+    with Image.open(written.path) as image:
+        assert image.size == (
+            render_lib.WIDTH,
+            render_lib.HEIGHT + render_lib.HEAT_PANEL_HEIGHT,
+        )
+        assert image.getpixel((10, render_lib.MAP_BOTTOM + 10)) == (1, 2, 3)
+
+
 def test_two_renders_are_two_files(tmp_path, basemap):
     summary = demo_summary("daily")
     first = render_lib.render_map(

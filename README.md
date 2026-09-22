@@ -55,6 +55,8 @@ python3 -m venv .venv
 
 .venv/bin/python -m mushroom_alerts status           # last stored snapshot
 .venv/bin/python -m mushroom_alerts status --json
+.venv/bin/python -m mushroom_alerts collect-chmi     # archive raster, no rules/send
+.venv/bin/python -m mushroom_alerts collect-chmi --input response.json
 .venv/bin/python -m mushroom_alerts export-health --json  # sanitized health v1
 
 .venv/bin/python -m mushroom_alerts calibration         # bias/MAE, read-only
@@ -152,13 +154,23 @@ antispam/emission state.
 
 ## The map
 
-`brief --mode daily|weekend --map-dir PATH` draws the same block as a
-1200×1600 PNG and prints its absolute path as a last line, `MEDIA:<path>`,
+`brief --mode daily|weekend --map-dir PATH` draws the same block and prints
+its absolute path as a last line, `MEDIA:<path>`,
 after `ОГОВОРКИ` (`--json` adds `map_path`). Hermes turns that line into a
 native Telegram photo and strips it from the visible text. Without the flag
 the output is byte-for-byte what it was before.
 
-The page is a header with the date, the basemap of the area (1200×1000)
+Once at least one full-country ČHMÚ raster is archived, the output is a
+1200×2350 PNG. Between the regional map and the location list it adds a map
+of Czechia showing, per pixel, how many days in the latest 21 calendar days
+had ČHMÚ level 4 or 5. Levels 4 and 5 have equal weight. The colour scale is
+always 0..21 and the header states actual archive coverage, for example
+`1/21`, so the initial collection period is explicit. If the archive is empty
+or this panel fails, delivery falls back to the original 1200×1600 map.
+The accumulated layer is visual only and does not affect chances, rules or
+the send decision.
+
+The page starts with a header with the date and the basemap of the area (1200×1000)
 with one colour-coded dot per location and its percentage in 52 px next to
 it, the full list of locations in the order of `locations.yaml` in two
 columns underneath, and a footer with the colour scale, a distance scale
@@ -187,6 +199,14 @@ stderr — it is never dropped quietly.
 The basemap itself is a committed artefact (`assets/basemap/`), built once
 by `tools/build_basemap.py`; rendering needs no network, no tiles and no
 browser.
+
+Every successful ČHMÚ fetch made by `check` or `brief` archives the decoded
+source PNG unchanged in SQLite. `collect-chmi` performs only that source fetch
+and archive write; it never evaluates rules or sends a report. `--input PATH`
+imports a previously saved API JSON response. One corrected artifact replaces
+the previous bytes for the same source, kind and date; different dates are
+retained indefinitely. `status` reports the newest raster and rolling 21-day
+coverage.
 
 `calibration [--json]` compares archived Open-Meteo rainfall and projected
 API30 with later station observations. It reports sample size, bias
@@ -247,10 +267,11 @@ failures are soft by design.
   rollback compatibility. Metrics in one view always come from one release.
   Schema v3 adds a stable content hash: identical reruns reuse the same release,
   while changed values on the same day create a new one.
-- SQLite migrations use `PRAGMA user_version`; current schema version is 5.
+- SQLite migrations use `PRAGMA user_version`; current schema version is 6.
   Schema v4 adds the additive `reports` table (one row per date and mode);
   schema v5 adds the additive `reports.chances_json` column, the per-location
-  percentages the send rule compares.
+  percentages the send rule compares; schema v6 adds `source_artifacts` for
+  dated binary upstream payloads such as the full ČHMÚ raster.
 - The map is an attachment, not part of the decision: it is rendered after
   the report row is stored, only when the block says to send, and a failure
   to draw never changes the text, the exit code or the stored state. Every

@@ -32,6 +32,9 @@ Tables
     SQLite rather than in an agent's notepad (PLAN §2b).  Schema v5 adds
     ``chances_json``: the send rule compares percentages (PLAN §9d), while
     the verdicts stay for the debugging view.
+``source_artifacts``
+    Dated binary upstream payloads, such as the full ČHMÚ mushroom raster.
+    Schema v6 keeps one corrected/up-to-date artifact per source, kind and day.
 """
 
 from __future__ import annotations
@@ -45,12 +48,12 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
-from .base import Location, Reading, utcnow
+from .base import Location, Reading, SourceArtifact, utcnow
 
 __all__ = ["Store", "db_path", "DEFAULT_DB", "SCHEMA_VERSION"]
 
 DEFAULT_DB = "state.sqlite"
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS readings (
@@ -173,6 +176,23 @@ CREATE UNIQUE INDEX IF NOT EXISTS forecast_runs_content
     WHERE content_hash IS NOT NULL;
 """
 
+MIGRATION_6 = """
+CREATE TABLE IF NOT EXISTS source_artifacts (
+    id           INTEGER PRIMARY KEY,
+    source       TEXT NOT NULL,
+    kind         TEXT NOT NULL,
+    date         TEXT NOT NULL,
+    content_type TEXT NOT NULL,
+    sha256       TEXT NOT NULL,
+    data         BLOB NOT NULL,
+    meta_json    TEXT,
+    fetched_at   TEXT NOT NULL,
+    UNIQUE (source, kind, date)
+);
+CREATE INDEX IF NOT EXISTS source_artifacts_lookup
+    ON source_artifacts (source, kind, date);
+"""
+
 
 def db_path() -> Path:
     """Where the SQLite file lives (``$MUSHROOM_DB`` or ``./state.sqlite``)."""
@@ -255,6 +275,10 @@ class Store:
                     "TEXT NOT NULL DEFAULT '{}'"
                 )
             self.conn.execute("PRAGMA user_version=5")
+            version = 5
+        if version < 6:
+            self.conn.executescript(MIGRATION_6)
+            self.conn.execute("PRAGMA user_version=6")
 
     def _backfill_notifications(self) -> None:
         for row in self.conn.execute("SELECT * FROM notifications ORDER BY id"):
@@ -356,6 +380,119 @@ class Store:
         if forecasts:
             self.upsert_forecasts(forecasts)
         return len(rows)
+
+    # ------------------------------------------------------------------
+    # source artifacts
+    # ------------------------------------------------------------------
+    def upsert_artifacts(
+        self,
+        artifacts: Iterable[SourceArtifact],
+        *,
+        retrieved_at: datetime | None = None,
+    ) -> int:
+        """Archive dated binary payloads idempotently.
+
+        A later fetch for the same source/kind/day replaces the bytes.  This
+        accommodates an upstream correction without retaining ambiguous
+        duplicate snapshots for one calendar day.
+        """
+        rows = list(artifacts)
+        if not rows:
+            return 0
+        stamp = (retrieved_at or utcnow()).isoformat()
+        with self.conn:
+            self.conn.executemany(
+                """
+                INSERT INTO source_artifacts
+                    (source, kind, date, content_type, sha256, data,
+                     meta_json, fetched_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT (source, kind, date) DO UPDATE SET
+                    content_type = excluded.content_type,
+                    sha256 = excluded.sha256,
+                    data = excluded.data,
+                    meta_json = excluded.meta_json,
+                    fetched_at = excluded.fetched_at
+                """,
+                [
+                    (
+                        item.source,
+                        item.kind,
+                        _iso(item.date),
+                        item.content_type,
+                        hashlib.sha256(item.data).hexdigest(),
+                        sqlite3.Binary(item.data),
+                        item.meta_json(),
+                        stamp,
+                    )
+                    for item in rows
+                ],
+            )
+        return len(rows)
+
+    def artifacts(
+        self,
+        source: str,
+        kind: str,
+        *,
+        since: date | str | None = None,
+        until: date | str | None = None,
+        limit: int | None = None,
+    ) -> list[SourceArtifact]:
+        """Return archived payloads oldest first, optionally date-bounded."""
+        sql = "SELECT * FROM source_artifacts WHERE source=? AND kind=?"
+        args: list[Any] = [source, kind]
+        if since is not None:
+            sql += " AND date >= ?"
+            args.append(_iso(since))
+        if until is not None:
+            sql += " AND date <= ?"
+            args.append(_iso(until))
+        if limit is None:
+            sql += " ORDER BY date ASC"
+        else:
+            sql += " ORDER BY date DESC LIMIT ?"
+            args.append(max(0, int(limit)))
+        found = [_to_artifact(row) for row in self.conn.execute(sql, args)]
+        if limit is not None:
+            found.reverse()
+        return found
+
+    def artifact_archive_status(
+        self,
+        source: str,
+        kind: str,
+        *,
+        window_days: int = 21,
+    ) -> dict[str, Any]:
+        """Summarise archive coverage ending at its newest stored day."""
+        row = self.conn.execute(
+            """SELECT MAX(date) AS latest_date, COUNT(*) AS stored_total
+               FROM source_artifacts WHERE source=? AND kind=?""",
+            (source, kind),
+        ).fetchone()
+        latest = str(row["latest_date"]) if row and row["latest_date"] else None
+        total = int(row["stored_total"] or 0) if row else 0
+        available = 0
+        start = None
+        if latest:
+            latest_day = date.fromisoformat(latest)
+            start_day = date.fromordinal(latest_day.toordinal() - window_days + 1)
+            start = start_day.isoformat()
+            available = int(
+                self.conn.execute(
+                    """SELECT COUNT(DISTINCT date) FROM source_artifacts
+                       WHERE source=? AND kind=? AND date BETWEEN ? AND ?""",
+                    (source, kind, start, latest),
+                ).fetchone()[0]
+            )
+        return {
+            "latest_date": latest,
+            "window_start": start,
+            "available_days": available,
+            "window_days": window_days,
+            "stored_total": total,
+        }
 
     def _archive_forecast_groups(
         self,
@@ -973,5 +1110,22 @@ def _to_reading(row: sqlite3.Row | None) -> Reading | None:
         metric=row["metric"],
         value=row["value"],
         text=row["text"],
+        meta=meta,
+    )
+
+
+def _to_artifact(row: sqlite3.Row) -> SourceArtifact:
+    meta = None
+    if row["meta_json"]:
+        try:
+            meta = json.loads(row["meta_json"])
+        except json.JSONDecodeError:
+            meta = None
+    return SourceArtifact(
+        source=str(row["source"]),
+        kind=str(row["kind"]),
+        date=date.fromisoformat(str(row["date"])),
+        content_type=str(row["content_type"]),
+        data=bytes(row["data"]),
         meta=meta,
     )

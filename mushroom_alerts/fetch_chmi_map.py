@@ -58,12 +58,17 @@ from collections import Counter
 from datetime import date
 from typing import Any, Iterable
 
-from .base import FetchResult, Location, Reading
+from .base import FetchResult, Location, Reading, SourceArtifact
 
-__all__ = ["SOURCE", "URL", "BBOX", "PALETTE", "LEVEL_LABELS", "fetch", "pixel_for", "level_at", "decode_image", "parse_time_label"]
+__all__ = [
+    "SOURCE", "URL", "BBOX", "PALETTE", "LEVEL_LABELS", "ARTIFACT_KIND",
+    "fetch", "fetch_payload", "pixel_for", "level_at", "decode_image",
+    "decode_image_data", "parse_time_label",
+]
 
 SOURCE = "chmi_map"
 URL = "https://data-provider.chmi.cz/api/data/rizika/houby"
+ARTIFACT_KIND = "growth_raster"
 
 #: (min_lon, min_lat, max_lon, max_lat) in WGS84 degrees; raster is EPSG:3857.
 BBOX = (12.0424913, 48.403695, 19.1177213, 51.0596505)
@@ -123,19 +128,23 @@ def pixel_for(lat: float, lon: float, size: tuple[int, int]) -> tuple[int, int]:
 # ----------------------------------------------------------------------
 # image
 # ----------------------------------------------------------------------
-def decode_image(payload: dict[str, Any]):
-    """``{"img": "data:image/png;base64,..."}`` -> RGBA ``PIL.Image``."""
-    from PIL import Image  # imported lazily: keeps `base`/`store` Pillow-free
-
+def decode_image_data(payload: dict[str, Any]) -> bytes:
+    """Return the decoded PNG bytes without changing or recompressing them."""
     raw = payload.get("img")
     if not isinstance(raw, str) or not raw:
         raise ValueError("response has no 'img'")
     blob = raw.split(",", 1)[1] if raw.startswith("data:") else raw
     try:
-        data = base64.b64decode(blob, validate=False)
+        return base64.b64decode(blob, validate=False)
     except (binascii.Error, ValueError) as exc:
         raise ValueError(f"img is not valid base64: {exc}") from exc
-    return Image.open(io.BytesIO(data)).convert("RGBA")
+
+
+def decode_image(payload: dict[str, Any]):
+    """``{"img": "data:image/png;base64,..."}`` -> RGBA ``PIL.Image``."""
+    from PIL import Image  # imported lazily: keeps `base`/`store` Pillow-free
+
+    return Image.open(io.BytesIO(decode_image_data(payload))).convert("RGBA")
 
 
 def level_at(image, lat: float, lon: float, window: int = WINDOW) -> tuple[int | None, tuple[int, int], int]:
@@ -204,18 +213,51 @@ def parse_time_label(label: str | None, today: date) -> date | None:
 # ----------------------------------------------------------------------
 def fetch(locations: Iterable[Location], *, http: Any, today: date) -> FetchResult:
     """One request for the whole country, then one pixel per location."""
-    locs = list(locations)
     try:
         payload = http.get_json(URL)
         if not isinstance(payload, dict):
             raise ValueError(f"expected a JSON object, got {type(payload).__name__}")
-        image = decode_image(payload)
     except Exception as exc:  # noqa: BLE001 - soft failure, PLAN §6
+        return FetchResult.failure(SOURCE, f"{type(exc).__name__}: {exc}")
+    return fetch_payload(locations, payload=payload, today=today)
+
+
+def fetch_payload(
+    locations: Iterable[Location], *, payload: dict[str, Any], today: date
+) -> FetchResult:
+    """Parse an already loaded API response, used by fetch and backfills."""
+    locs = list(locations)
+    try:
+        png = decode_image_data(payload)
+        from PIL import Image
+
+        image = Image.open(io.BytesIO(png)).convert("RGBA")
+        image.load()
+    except Exception as exc:  # noqa: BLE001 - source payload is untrusted
         return FetchResult.failure(SOURCE, f"{type(exc).__name__}: {exc}")
 
     time_label = payload.get("timeLabel")
     label_date = parse_time_label(time_label, today)
     stale = label_date is not None and (today - label_date).days > STALE_AFTER_DAYS
+    artifact_date = label_date or today
+    artifact_meta: dict[str, Any] = {
+        "bbox": list(BBOX),
+        "projection": "EPSG:3857",
+        "size": list(image.size),
+        "time_label": time_label,
+    }
+    if label_date is None:
+        artifact_meta["date_inferred_from_fetch"] = True
+    artifacts = [
+        SourceArtifact(
+            source=SOURCE,
+            kind=ARTIFACT_KIND,
+            date=artifact_date,
+            content_type="image/png",
+            data=png,
+            meta=artifact_meta,
+        )
+    ]
 
     readings: list[Reading] = []
     missing: list[str] = []
@@ -257,8 +299,10 @@ def fetch(locations: Iterable[Location], *, http: Any, today: date) -> FetchResu
 
     error = "; ".join(missing) or None
     if not readings:
-        return FetchResult.failure(SOURCE, error or "no locations resolved", location_errors)
-    return FetchResult.success(SOURCE, readings, error, location_errors)
+        error = error or "no locations resolved"
+    return FetchResult.success(
+        SOURCE, readings, error, location_errors, artifacts=artifacts
+    )
 
 
 def params_for(location: Location, size: tuple[int, int]) -> dict[str, Any]:

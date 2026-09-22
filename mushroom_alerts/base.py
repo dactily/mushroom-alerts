@@ -131,6 +131,7 @@ __all__ = [
     "WindowAggregate",
     "Location",
     "Reading",
+    "SourceArtifact",
     "FetchResult",
     "Decision",
     "Fetcher",
@@ -274,6 +275,27 @@ class Reading:
         return (self.source, self.location, self.date.isoformat(), self.metric, self.issued)
 
 
+@dataclass(frozen=True, slots=True)
+class SourceArtifact:
+    """A dated binary source payload worth retaining verbatim.
+
+    Artifacts are independent of point readings.  A fetcher may therefore
+    archive a country-wide raster even when no watched location resolves.
+    """
+
+    source: str
+    kind: str
+    date: date
+    content_type: str
+    data: bytes
+    meta: dict[str, Any] | None = None
+
+    def meta_json(self) -> str | None:
+        if self.meta is None:
+            return None
+        return json.dumps(self.meta, ensure_ascii=False, sort_keys=True, default=str)
+
+
 @dataclass(slots=True)
 class FetchResult:
     """What one source produced in one run.
@@ -289,6 +311,7 @@ class FetchResult:
     error: str | None = None
     fetched_at: datetime = field(default_factory=utcnow)
     location_errors: dict[str, str] = field(default_factory=dict)
+    artifacts: list[SourceArtifact] = field(default_factory=list)
 
     @classmethod
     def failure(
@@ -309,6 +332,7 @@ class FetchResult:
         readings: list[Reading],
         error: str | None = None,
         location_errors: Mapping[str, str] | None = None,
+        artifacts: list[SourceArtifact] | None = None,
     ) -> "FetchResult":
         return cls(
             source=source,
@@ -316,6 +340,7 @@ class FetchResult:
             readings=list(readings),
             error=error,
             location_errors=dict(location_errors or {}),
+            artifacts=list(artifacts or []),
         )
 
     def for_location(self, slug: str) -> list[Reading]:

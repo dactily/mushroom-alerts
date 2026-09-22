@@ -103,6 +103,7 @@ except ImportError:  # pragma: no cover - exercised by whichever branch is alone
 __all__ = [
     "WIDTH",
     "HEIGHT",
+    "HEAT_PANEL_HEIGHT",
     "LABEL_OFFSETS",
     "PRUNE_DAYS",
     "FILE_PATTERN",
@@ -128,6 +129,7 @@ __all__ = [
 # ----------------------------------------------------------------------
 WIDTH = 1200
 HEIGHT = 1600
+HEAT_PANEL_HEIGHT = 750
 
 HEADER_TOP, HEADER_BOTTOM = 0, 140
 MAP_TOP, MAP_BOTTOM = 140, 1140
@@ -1185,6 +1187,7 @@ def render_map(
     directory: Path | str,
     basemap: Any = None,
     token: str | None = None,
+    heatmap_panel: Image.Image | None = None,
 ) -> MapFile:
     """Render the summary and write it into ``directory``.
 
@@ -1195,6 +1198,20 @@ def render_map(
     folder = Path(directory)
     folder.mkdir(parents=True, exist_ok=True)
     image, layout = render_image(summary, locations=locations, basemap=basemap)
+    if heatmap_panel is not None:
+        if heatmap_panel.size != (WIDTH, HEAT_PANEL_HEIGHT):
+            raise ValueError(
+                f"heatmap panel must be {WIDTH}x{HEAT_PANEL_HEIGHT}, "
+                f"got {heatmap_panel.width}x{heatmap_panel.height}"
+            )
+        combined = Image.new("RGB", (WIDTH, HEIGHT + HEAT_PANEL_HEIGHT), PAGE_BG)
+        combined.paste(image.crop((0, 0, WIDTH, MAP_BOTTOM)), (0, 0))
+        combined.paste(heatmap_panel.convert("RGB"), (0, MAP_BOTTOM))
+        combined.paste(
+            image.crop((0, MAP_BOTTOM, WIDTH, HEIGHT)),
+            (0, MAP_BOTTOM + HEAT_PANEL_HEIGHT),
+        )
+        image = combined
     path = folder / map_name(str(summary["mode"]), summary["date"], token)
     _write_atomic(image, path)
     return MapFile(path=path.resolve(), layout=layout, warnings=layout.warnings)
