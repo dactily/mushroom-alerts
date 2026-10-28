@@ -143,7 +143,12 @@ no tables, Russian, with `ОТПРАВЛЯТЬ: да|нет` on the first line, 
 the order of `locations.yaml`), `ФАЗА`, `ПОДРОБНО` for the two locations with
 the best chance, and `ОГОВОРКИ`. The decision compares today against the last
 report of an earlier date stored in `reports`; the weekend plan is always
-sent. `--mode --json` prints the same fields as a dict. `--days N`
+sent. A daily message requires at least one location to increase by 10 or
+more percentage points and reach a value strictly greater than 60%.
+The first run only records a baseline. Decreases, smaller increases,
+missing values and source-status changes do not trigger daily messages.
+Silent reports still become the next day's comparison baseline.
+`--mode --json` prints the same fields as a dict. `--days N`
 shortens the forecast table, `--location SLUG` (repeatable) narrows either
 view to a few locations -- a debugging filter, so with `--mode` it prints the
 decision but records no report row. `--json` gives the same content as a dict

@@ -103,12 +103,13 @@ mushroom-alerts/
 
 Решение «писать или молчать» принимает скрипт, не LLM. Сообщение человеку — только при переходе состояния, плюс план на выходные по пятницам.
 
-**Ежедневно (`brief --mode daily`)** — сравнение с последним отчётом предыдущей даты, отправка если:
-1. вердикт по любой локации изменился (низкая / средняя / высокая / недостаточно данных);
-2. дата возможной «высокой» впервые вошла в ближайшие 7 дней, пропала из них или сдвинулась больше чем на 2 дня;
-3. первый запуск, или сменился класс ошибки (`none` / `station` / `brief`). Недоступность карты ČHMÚ или HoubyMapa — не новость, только строка `ОГОВОРКИ`.
-
-Иначе `ОТПРАВЛЯТЬ: нет`. Пока «высокая» держится — молчим, грибы стоят 5–10 дней, пятница напомнит.
+**Daily (`brief --mode daily`):** compare each location with the last daily
+report from an earlier date, including silent reports. Send only if at least
+one location increased by 10 or more percentage points and its new chance
+is strictly greater than 60%. The first run only records a baseline.
+Decreases, small threshold crossings, new or missing values, and source
+failure or recovery do not trigger daily messages. Five-point daily increases
+do not accumulate. See section 9d for the current notification policy.
 
 **Пятница (`brief --mode weekend`)** — всегда; если бриф не собрался — одна строка про отсутствие данных.
 
@@ -274,7 +275,13 @@ score  = (0.40·влага + 0.30·фаза + 0.30·карты) / (веса сл
 
 ### 9d. Правило отправки при многих локациях
 
-Прежнее «вердикт любой локации изменился» на 20 точках сработает почти каждый день. Заменяется на: шанс хотя бы одной локации изменился на ≥ 10 пунктов против прошлого отчёта, или лучший шанс пересёк 60 % в любую сторону, или первый запуск, или сменился класс ошибки. Пятничный план на выходные отправляется всегда.
+Daily alerts require at least one location to increase by at least 10
+percentage points and reach a chance strictly greater than 60%, compared
+with the last daily report from an earlier date. Only qualifying increases
+appear in the compact change list. The first run records a silent baseline.
+Decreases, smaller increases, threshold crossings alone, location additions,
+missing or restored values, and source-status changes do not trigger alerts.
+The Friday weekend plan always sends.
 
 ### 9e. Что масштабируется как есть
 

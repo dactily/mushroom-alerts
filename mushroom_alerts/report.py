@@ -30,8 +30,8 @@ A location may also have no number at all: :mod:`~mushroom_alerts.chance`
 refuses to invent one when that day's API30 is missing or stale.  It prints
 «нет данных» in the list, is named under ``ОГОВОРКИ`` with the reason, and
 is not eligible for ``ПОДРОБНО`` -- a technical line explaining a headline
-that says there is no number explains nothing.  Gaining or losing a number
-is news; having none on both sides is not.
+that says there is no number explains nothing. Missing values do not count
+as evidence of a chance increase and do not trigger daily alerts.
 """
 
 from __future__ import annotations
@@ -419,9 +419,14 @@ def state_of(summary: Mapping[str, Any]) -> dict[str, Any]:
 # ----------------------------------------------------------------------
 # the send / silent decision
 # ----------------------------------------------------------------------
-def _best(chances: Mapping[str, Any]) -> int | None:
-    values = [int(value) for value in chances.values() if value is not None]
-    return max(values) if values else None
+def _alert_increase(previous: int | None, current: int | None) -> bool:
+    """Require a measured increase and a chance strictly above the threshold."""
+    return (
+        previous is not None
+        and current is not None
+        and current > policy.CHANCE_ALERT_PCT
+        and current - previous >= policy.CHANCE_MOVE_PCT
+    )
 
 
 def _reason(reasons: Sequence[str]) -> str:
@@ -430,31 +435,13 @@ def _reason(reasons: Sequence[str]) -> str:
     return "; ".join(reasons[:REASON_ITEMS]) + f"; ещё изменений: {len(reasons) - REASON_ITEMS}"
 
 
-def _crossing_reason(previous: int | None, current: int | None) -> str | None:
-    """The best chance crossing :data:`policy.CHANCE_ALERT_PCT` is news."""
-    threshold = policy.CHANCE_ALERT_PCT
-    was = previous is not None and previous >= threshold
-    now = current is not None and current >= threshold
-    if was == now:
-        return None
-    if now:
-        return f"лучший шанс {current} %, выше {threshold} %"
-    return f"лучший шанс упал до {_pct(current)}, ниже {threshold} %"
-
-
 def decide(store: Store, summary: Mapping[str, Any]) -> tuple[bool, str]:
-    """Send when the numbers moved (PLAN §9d); the weekend plan always goes.
+    """Alert on an increase of at least ten points to a value above 60%.
 
-    With twenty locations the old "any verdict changed" rule fired almost
-    every day, because a verdict is a coarse word.  A percentage moves
-    smoothly, so the rule is about the size of the move: ten points
-    anywhere, or the best location crossing 60 % in either direction.
-
-    A location can also have no number at all («нет данных»).  Appearing or
-    disappearing is news either way -- the block the user reads changes --
-    while «нет данных» on both sides is not, however long it lasts.  A
-    location that is absent from the stored state is new; one stored as
-    ``null`` was there and had nothing to say.
+    One qualifying location is enough. Decreases, small threshold crossings,
+    new locations, missing values and source-status changes do not trigger
+    daily alerts. The first daily run establishes the comparison baseline.
+    Weekend reports always send, including when the brief cannot be built.
 
     The comparison is always against the last report from an *earlier*
     date, so running the same mode twice on one day yields the same answer.
@@ -470,7 +457,7 @@ def decide(store: Store, summary: Mapping[str, Any]) -> tuple[bool, str]:
 
     previous = store.last_report(mode, before=today)
     if previous is None:
-        return True, "первый запуск, предыдущего отчёта нет"
+        return False, "No previous daily report to compare"
 
     old_chances = json.loads(previous["chances_json"] or "{}")
     reasons: list[str] = []
@@ -479,35 +466,12 @@ def decide(store: Store, summary: Mapping[str, Any]) -> tuple[bool, str]:
         name = item["short_name"]
         now = state["chances"][item["slug"]]
         before = old_chances.get(item["slug"])
-        if item["slug"] not in old_chances:
-            if now is not None:
-                reasons.append(f"{name}: новая локация, шанс {now} %")
-            continue
-        if before is None and now is None:
-            continue  # nothing to say yesterday, nothing to say today
-        if before is None:
-            reasons.append(f"{name}: данные появились, шанс {now} %")
-        elif now is None:
-            reasons.append(f"{name}: данные пропали")
-        elif abs(now - int(before)) >= policy.CHANCE_MOVE_PCT:
-            reasons.append(f"{name}: шанс {int(before)} % → {now} %")
-
-    crossing = _crossing_reason(_best(old_chances), _best(state["chances"]))
-    if crossing:
-        reasons.append(crossing)
-
-    if str(previous["error_class"]) != state["error_class"]:
-        if state["error_class"] == "none":
-            reasons.append("источники снова работают")
-        else:
-            reasons.append(
-                "сбой данных: "
-                + ("бриф не собрался" if state["error_class"] == "brief" else "станция ČHMÚ недоступна")
-            )
+        if _alert_increase(before, now):
+            reasons.append(f"{name}: chance {int(before)}% -> {now}%")
 
     if reasons:
         return True, _reason(reasons)
-    return False, "ничего не изменилось с прошлого отчёта"
+    return False, "No qualifying chance increase since the previous daily report"
 
 
 # ----------------------------------------------------------------------
@@ -822,8 +786,7 @@ def publish(store: Store, summary: MutableMapping[str, Any]) -> tuple[bool, str]
     summary["changes"] = [
         f"{item['short_name']}: {int(old[item['slug']])} → {item['chance']} %"
         for item in summary["locations"]
-        if old.get(item["slug"]) is not None and item["chance"] is not None
-        and abs(item["chance"] - int(old[item["slug"]])) >= policy.CHANCE_MOVE_PCT
+        if _alert_increase(old.get(item["slug"]), item["chance"])
     ]
     state = state_of(summary)
     store.save_report(
