@@ -172,17 +172,19 @@ def store(tmp_path):
 # ----------------------------------------------------------------------
 # the decision (PLAN §9d)
 # ----------------------------------------------------------------------
-def test_first_run_always_sends(store):
-    send, reason = report_lib.publish(store, summary())
-    assert send is True
-    assert "первый запуск" in reason
+@pytest.mark.parametrize("chance", [None, 40, 60, 85])
+def test_first_daily_run_records_a_baseline_without_sending(store, chance):
+    send, reason = report_lib.publish(store, summary(payload=brief(location(chance=chance))))
+    assert send is False
+    assert reason == "No previous daily report to compare"
+    assert json.loads(store.last_report("daily")["chances_json"])["valmez"] == chance
 
 
 def test_an_unchanged_day_stays_silent(store):
     report_lib.publish(store, summary(today=FRIDAY))
     send, reason = report_lib.publish(store, summary(today=TODAY))
     assert send is False
-    assert reason == "ничего не изменилось с прошлого отчёта"
+    assert reason == "No qualifying chance increase since the previous daily report"
 
 
 @pytest.mark.parametrize(
@@ -191,15 +193,23 @@ def test_an_unchanged_day_stays_silent(store):
         (40, 40, False),
         (40, 49, False),  # nine points is noise
         (40, 31, False),
-        (40, 50, True),  # ten points is news
-        (40, 30, True),
-        (55, 60, True),  # five points, but the 60 % line was crossed
-        (60, 55, True),
+        (40, 50, False),
+        (40, 30, False),
+        (50, 60, False),  # exactly 60% is below the strict alert boundary
+        (55, 60, False),
+        (60, 55, False),
+        (55, 65, True),
+        (60, 65, False),  # a threshold crossing alone is not enough
+        (65, 70, False),
+        (65, 74, False),
+        (65, 75, True),
+        (70, 80, True),
+        (80, 65, False),
         (61, 95, True),
         (65, 62, False),  # both sides of the line, no big move
     ],
 )
-def test_the_send_rule_is_about_the_size_of_the_move(store, before, now, sends):
+def test_daily_alert_requires_ten_points_up_and_more_than_sixty(store, before, now, sends):
     report_lib.publish(
         store, summary(today=FRIDAY, payload=brief(location(chance=before, today=FRIDAY)))
     )
@@ -210,59 +220,65 @@ def test_the_send_rule_is_about_the_size_of_the_move(store, before, now, sends):
 
 
 def test_a_move_at_any_single_location_is_enough(store):
-    report_lib.publish(store, summary(today=FRIDAY, payload=four_locations(FRIDAY)))
+    report_lib.publish(
+        store, summary(today=FRIDAY, payload=four_locations(FRIDAY, valmez=85))
+    )
     send, reason = report_lib.publish(
-        store, summary(today=TODAY, payload=four_locations(katerinice=15))
+        store, summary(today=TODAY, payload=four_locations(valmez=85, katerinice=65))
     )
     assert send is True
-    assert "Kateřinice: шанс 35 % → 15 %" in reason
+    assert "Kateřinice: chance 35% -> 65%" in reason
 
 
-def test_a_new_location_is_news(store):
+def test_a_new_location_above_the_threshold_is_not_an_increase(store):
     report_lib.publish(store, summary(today=FRIDAY))
     send, reason = report_lib.publish(
         store,
         summary(
             today=TODAY,
-            payload=brief(location(), location(slug="rajnochovice", name="Rajnochovice", short=None)),
+            payload=brief(
+                location(),
+                location(slug="rajnochovice", name="Rajnochovice", short=None, chance=85),
+            ),
         ),
     )
-    assert send is True
-    assert "Rajnochovice: новая локация, шанс 40 %" in reason
+    assert send is False, reason
 
 
-def test_the_crossing_names_the_threshold(store):
-    report_lib.publish(
-        store, summary(today=FRIDAY, payload=brief(location(chance=55, today=FRIDAY)))
-    )
-    _, reason = report_lib.publish(
-        store, summary(today=TODAY, payload=brief(location(chance=60)))
-    )
-    assert reason == "лучший шанс 60 %, выше 60 %"
-
-    _, reason = report_lib.publish(
-        store,
-        report_lib.summarize(
-            brief(location(chance=55, today=TODAY + timedelta(days=1))),
-            mode="daily",
-            today=TODAY + timedelta(days=1),
-        ),
-    )
-    assert reason == "лучший шанс упал до 55 %, ниже 60 %"
+def test_small_daily_increases_do_not_accumulate_into_an_alert(store):
+    for offset, chance in enumerate((55, 60, 65, 70, 75)):
+        day = FRIDAY + timedelta(days=offset)
+        item = summary(today=day, payload=brief(location(chance=chance, today=day)))
+        send, _ = report_lib.publish(store, item)
+        assert send is False
+        assert item["changes"] == []
+    assert store.last_report("daily")["sent"] == 0
 
 
-def test_a_new_error_class_sends_once(store):
+def test_source_failure_and_recovery_do_not_trigger_daily_alerts(store):
     report_lib.publish(store, summary(today=FRIDAY))
-    broken = brief(location(), failed=["chmi_station"], notes=["станция: 502"])
+    broken = brief(location(), failed=["chmi_station"], notes=["station: 502"])
     send, reason = report_lib.publish(
         store, summary(today=TODAY, payload=broken)
     )
-    assert send is True and "станция ČHMÚ недоступна" in reason
+    assert send is False, reason
 
     tomorrow = TODAY + timedelta(days=1)
     still = report_lib.summarize(broken, mode="daily", today=tomorrow)
     send, _ = report_lib.publish(store, still)
     assert send is False
+
+    recovered = summary(today=tomorrow + timedelta(days=1))
+    send, _ = report_lib.publish(store, recovered)
+    assert send is False
+
+
+def test_a_qualifying_increase_can_send_with_a_source_caveat(store):
+    report_lib.publish(store, summary(today=FRIDAY, payload=brief(location(chance=55))))
+    item = summary(payload=brief(location(chance=65), failed=["chmi_station"]))
+    send, reason = report_lib.publish(store, item)
+    assert send is True, reason
+    assert item["error_class"] == "station"
 
 
 def test_a_dead_map_is_a_caveat_not_a_reason_to_write(store):
@@ -277,9 +293,11 @@ def test_a_dead_map_is_a_caveat_not_a_reason_to_write(store):
 
 def test_rerunning_the_same_day_is_idempotent(store):
     report_lib.publish(store, summary(today=FRIDAY))
-    first = report_lib.publish(store, summary(today=TODAY))
-    second = report_lib.publish(store, summary(today=TODAY))
+    item = summary(today=TODAY, payload=brief(location(chance=65)))
+    first = report_lib.publish(store, item)
+    second = report_lib.publish(store, item)
     assert first == second
+    assert first[0] is True
     rows = store.conn.execute(
         "SELECT COUNT(*) FROM reports WHERE mode='daily'"
     ).fetchone()[0]
@@ -312,7 +330,8 @@ def test_the_weekend_plan_reports_a_broken_brief(store):
 def test_the_daily_and_weekend_states_do_not_mix(store):
     report_lib.publish(store, summary("weekend", today=FRIDAY))
     send, reason = report_lib.publish(store, summary("daily", today=TODAY))
-    assert send is True and "первый запуск" in reason
+    assert send is False
+    assert reason == "No previous daily report to compare"
 
 
 def test_an_unknown_mode_is_rejected():
@@ -574,15 +593,14 @@ def test_many_blind_locations_are_counted_not_listed():
 
 
 @pytest.mark.parametrize(
-    "before, now, sends, needle",
+    "before, now",
     [
-        (40, None, True, "Valmez: данные пропали"),
-        (None, 40, True, "Valmez: данные появились, шанс 40 %"),
-        (None, None, False, "ничего не изменилось с прошлого отчёта"),
+        (85, None),
+        (None, 85),
+        (None, None),
     ],
 )
-def test_a_number_appearing_or_disappearing_is_news(store, before, now, sends, needle):
-    """The block the user reads changed, so say it -- but silence stays silent."""
+def test_missing_values_cannot_prove_an_increase(store, before, now):
     report_lib.publish(
         store,
         summary(today=FRIDAY, payload=brief(location(chance=before, today=FRIDAY))),
@@ -591,8 +609,7 @@ def test_a_number_appearing_or_disappearing_is_news(store, before, now, sends, n
         store, summary(today=TODAY, payload=brief(location(chance=now)))
     )
 
-    assert send is sends
-    assert needle in reason
+    assert send is False, reason
 
 
 def test_a_new_location_without_a_number_is_not_news(store):
@@ -692,7 +709,7 @@ def test_json_carries_the_same_fields(store):
     payload = report_lib.to_json(item, send=send, reason=reason)
     assert payload["mode"] == "daily"
     assert payload["date"] == "2026-09-12"
-    assert payload["send"] is True
+    assert payload["send"] is False
     assert payload["header"] == "🍄 Грибной прогноз: 12.09"
     assert payload["chance_title"] == "ШАНС на 12.09"
     assert payload["chances"] == ["Valmez — 40 %"]
@@ -701,7 +718,7 @@ def test_json_carries_the_same_fields(store):
     )
     assert payload["phase_text"].startswith("дождь прошёл 11.09")
     assert payload["error_class"] == "none"
-    assert payload["rules_version"] == "7"
+    assert payload["rules_version"] == "8"
     assert payload["locations"][0]["chance"] == 40
     assert payload["locations"][0]["chance_peak"] == ["2026-09-18", 70]
     assert payload["locations"][0]["verdict"] == "medium"
@@ -714,11 +731,11 @@ def test_the_stored_state_is_what_the_next_run_compares(store):
     report_lib.publish(store, item)
     row = store.last_report("daily")
     assert row["date"] == "2026-09-12"
-    assert row["sent"] == 1
+    assert row["sent"] == 0
     assert '"valmez": 40' in row["chances_json"]
     assert '"valmez": "medium"' in row["verdicts_json"]
     assert "2026-09-18" in row["candidates_json"]
-    assert row["rules_version"] == "7"
+    assert row["rules_version"] == "8"
     assert store.last_report("daily", before=TODAY) is None
 
 
@@ -773,7 +790,7 @@ def test_a_long_list_of_reasons_is_trimmed(store):
     report_lib.publish(store, report_lib.summarize(payload, mode="daily", today=FRIDAY))
     moved = brief(
         *(
-            location(slug=f"loc-{n}", name=f"Location {n}", short=None, chance=10)
+            location(slug=f"loc-{n}", name=f"Location {n}", short=None, chance=65)
             for n in range(8)
         )
     )
@@ -855,11 +872,21 @@ def test_compact_weekend_compares_only_complete_pairs():
 def test_compact_changes_compare_previous_date_and_survive_retry(store):
     first = summary(payload=brief(location(chance=40)))
     report_lib.publish(store, first)
-    later = summary(today=TODAY + timedelta(days=1), payload=brief(location(chance=55)))
+    later = summary(today=TODAY + timedelta(days=1), payload=brief(location(chance=65)))
     report_lib.publish(store, later)
-    assert later["changes"] == ["Valmez: 40 → 55 %"]
+    assert later["changes"] == ["Valmez: 40 → 65 %"]
     report_lib.publish(store, later)
-    assert later["changes"] == ["Valmez: 40 → 55 %"]
+    assert later["changes"] == ["Valmez: 40 → 65 %"]
+
+
+def test_compact_changes_only_include_the_locations_that_triggered_the_alert(store):
+    report_lib.publish(store, summary(today=FRIDAY, payload=four_locations(FRIDAY)))
+    item = summary(payload=four_locations(
+        valmez=20, bystrice_pod_hostynem=60, rajnochovice=60, katerinice=65,
+    ))
+    send, _ = report_lib.publish(store, item)
+    assert send is True
+    assert item["changes"] == ["Kateřinice: 35 → 65 %"]
 
 
 @pytest.mark.parametrize(
