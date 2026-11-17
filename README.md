@@ -1,5 +1,9 @@
 # mushroom-alerts
 
+Production releases must use merged `main` commits. Follow the
+[release policy and deployment gate](docs/operations/release-policy.md)
+before updating the server.
+
 With a map attached, daily/weekend posts use a short companion text:
 up to two significant daily changes against the previous report date,
 upcoming and active windows, and data problems when present. Weekend text
