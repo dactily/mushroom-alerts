@@ -37,21 +37,23 @@ or omits locations, the full text remains. Debug JSON retains all fields.
 
 ## Send rules (in the script, not in the prompt)
 
-Daily, `send = да` when at least one holds:
+Daily reports send only when at least one location meets both conditions:
 
-1. there is no daily report from an earlier date (first run);
-2. the chance of any location moved by 10 points or more against the last
-   daily report;
-3. the best chance crossed 60 % in either direction;
-4. a location appeared that the last report did not have;
-5. a location gained or lost its number («нет данных» → a percentage, or a
-   percentage → «нет данных»); «нет данных» on both sides is not news;
-6. `error_class` changed (`none` / `station` / `brief`); a dead ČHMÚ map or
-   HoubyMapa never changes it and only appears in `ОГОВОРКИ`.
+1. Its chance increased by at least 10 percentage points compared with the
+   last daily report from an earlier date.
+2. Its new chance is strictly greater than 60%.
 
-With twenty locations the previous rule ("any verdict changed") fired
-almost every day, because a verdict is a coarse word; a percentage moves
-smoothly, so the rule is about the size of the move.
+Examples: 55% to 65% and 65% to 75% send; 50% to 60%, 60% to 65%,
+and every decrease stay silent. A threshold crossing alone is insufficient.
+The comparison uses the previous daily calculation, including silent reports,
+not the last delivered message. Repeated increases of five points do not
+accumulate into an alert. The compact change list includes only qualifying
+increases.
+
+The first daily run records a baseline without sending. New locations,
+missing or restored values, and source failure or recovery do not trigger
+daily messages. Source health remains available in diagnostics and the health
+export; relevant caveats remain in reports that qualify for delivery.
 
 Weekend: always `да`. Re-running a mode on the same day is idempotent — the
 comparison is always against the last report from an earlier date, and the

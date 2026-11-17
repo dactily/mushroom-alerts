@@ -1,6 +1,6 @@
 """Central, versioned rule parameters used by calculations and documentation."""
 
-RULES_VERSION = "7"
+RULES_VERSION = "8"
 
 API30_DECAY = 0.93
 API30_WINDOW_DAYS = 30
@@ -155,8 +155,9 @@ CHANCE_STEP = 5
 CHANCE_MIN = 5
 CHANCE_MAX = 95
 
-#: Send rules over the chance (PLAN §9d).
+#: Daily alerts require an increase of at least this many percentage points.
 CHANCE_MOVE_PCT = 10
+#: The new chance must be strictly above this threshold to trigger an alert.
 CHANCE_ALERT_PCT = 60
 
 

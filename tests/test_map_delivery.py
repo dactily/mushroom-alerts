@@ -29,7 +29,7 @@ from mushroom_alerts.store import Store
 from tests.fake_basemap import FakeBasemap
 from tests.test_brief import (  # the same fake stack the block's own tests use
     fake_module,
-    full_stack,
+    full_stack as _full_stack,
     use_fetchers,
 )
 
@@ -67,6 +67,24 @@ def maps(tmp_path):
 def media_line(out: str) -> str | None:
     lines = out.rstrip("\n").splitlines()
     return lines[-1] if lines and lines[-1].startswith("MEDIA:") else None
+
+
+def full_stack(monkeypatch):
+    """Use wet conditions and a prior report that produce a real daily alert."""
+    _full_stack(monkeypatch, api30_mm=40.0)
+    with Store() as store:
+        store.save_report(
+            TODAY - timedelta(days=1),
+            "daily",
+            chances={"valmez": 40},
+            verdicts={},
+            candidates={},
+            events={},
+            error_class="none",
+            rules_version="7",
+            sent=False,
+            reason="Previous daily baseline",
+        )
 
 
 def silence_today(reason: str = "вчера") -> None:

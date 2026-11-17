@@ -12,6 +12,7 @@ import json
 import re
 import sys
 import types
+from dataclasses import replace
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -20,6 +21,7 @@ import pytest
 from mushroom_alerts import __main__ as cli
 from mushroom_alerts import brief as brief_lib
 from mushroom_alerts import locations as locations_lib
+from mushroom_alerts import policy
 from mushroom_alerts.base import Decision, FetchResult, Location, Reading
 from mushroom_alerts.store import Store
 
@@ -160,7 +162,7 @@ def test_render_has_every_section(tmp_path):
     assert "температура почвы: 5 см 17.6 °C, 10 см 17.7 °C" in text
     assert "влажность: 81 %" in text
     assert "биологическая оценка (детерминированная):" in text
-    assert "вердикт сегодня: средняя (rules v7)" in text
+    assert f"(rules v{policy.RULES_VERSION})" in text
     assert "шанс сегодня: 60 %" in text
     assert "не подтверждение отдельных плодовых тел" in text
     assert "возможная высокая вероятность:" in text
@@ -278,7 +280,13 @@ def use_fetchers(monkeypatch, modules):
     monkeypatch.setattr(cli, "discover_fetchers", lambda only=None: list(modules))
 
 
-def full_stack(monkeypatch, **kw):
+def full_stack(monkeypatch, *, api30_mm=None, **kw):
+    station = station_readings()
+    if api30_mm is not None:
+        station = [
+            replace(item, value=api30_mm) if item.metric == "api30_mm" else item
+            for item in station
+        ]
     use_fetchers(
         monkeypatch,
         [
@@ -286,7 +294,7 @@ def full_stack(monkeypatch, **kw):
             fake_module(
                 "houbymapa", readings=[r for r in map_readings() if r.source == "houbymapa"]
             ),
-            fake_module("chmi_station", readings=station_readings()),
+            fake_module("chmi_station", readings=station),
             fake_module("openmeteo", readings=openmeteo_readings(), **kw),
         ],
     )
@@ -441,8 +449,7 @@ def test_cli_brief_mode_daily_prints_the_block_and_records_it(monkeypatch, capsy
     full_stack(monkeypatch)
     assert cli.main(["brief", "--mode", "daily"]) == 0
     out = capsys.readouterr().out
-    assert out.startswith("ОТПРАВЛЯТЬ: да\n")
-    assert "ПРИЧИНА: первый запуск" in out
+    assert "No previous daily report to compare" in out
     assert "ЗАГОЛОВОК: 🍄 Грибной прогноз: " in out
     assert "ШАНС на " in out and "ФАЗА:" in out and "ОГОВОРКИ:" in out
     # only valmez has readings in these fixtures, so only valmez has a number
@@ -462,7 +469,7 @@ def test_cli_brief_mode_daily_prints_the_block_and_records_it(monkeypatch, capsy
     assert len(out.encode("utf-8")) <= 1536, len(out.encode("utf-8"))
     with Store() as store:
         row = store.last_report("daily")
-    assert row["mode"] == "daily" and row["sent"] == 1
+    assert row["mode"] == "daily" and row["sent"] == 0
 
 
 def test_cli_brief_mode_weekend_always_sends(monkeypatch, capsys):
@@ -507,20 +514,20 @@ def test_cli_brief_mode_stays_silent_when_nothing_moved(monkeypatch, capsys):
     assert cli.main(["brief", "--mode", "daily"]) == 0
     out = capsys.readouterr().out
     assert out.startswith("ОТПРАВЛЯТЬ: нет\n")
-    assert "ПРИЧИНА: ничего не изменилось с прошлого отчёта" in out
+    assert "No qualifying chance increase since the previous daily report" in out
 
 
 def test_cli_brief_mode_json(monkeypatch, capsys):
     full_stack(monkeypatch)
     assert cli.main(["brief", "--mode", "daily", "--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["mode"] == "daily" and payload["send"] is True
+    assert payload["mode"] == "daily" and payload["send"] is False
     assert payload["exit_code"] == 0
     assert payload["date"] == TODAY.isoformat()
     assert [loc["slug"] for loc in payload["locations"]] == [
         loc.slug for loc in locations_lib.load_locations(SHIPPED)
     ]
-    assert payload["text"].startswith("ОТПРАВЛЯТЬ: да")
+    assert "No previous daily report to compare" in payload["text"]
 
 
 def test_cli_brief_mode_reports_a_total_blackout(monkeypatch, capsys):
